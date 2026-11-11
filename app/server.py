@@ -1,0 +1,572 @@
+# -*- coding: utf-8 -*-
+"""Local web console for MediaCrawler: pick platform -> scan QR -> view data -> export Excel."""
+import json, glob, os, re, time, subprocess, threading
+from pathlib import Path
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
+import pandas as pd
+
+from tools import login_state
+from tools.async_file_writer import data_dir_of
+from tools import task_store, orchestrator, task_exporter
+from tools.scheduler import scheduler
+
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / "data"
+LOG = DATA / "server_run.log"
+QR_STATE = DATA / "qrcode_state.json"
+VENV_PY = __import__("sys").executable
+
+PLATFORMS = [
+    ("xhs", "小红书"), ("dy", "抖音"), ("wb", "微博"), ("ks", "快手"),
+    ("bili", "B站"), ("tieba", "贴吧"), ("zhihu", "知乎"), ("toutiao", "今日头条"),
+]
+PLAT_NAME = dict(PLATFORMS)
+CODES = [c for c, _ in PLATFORMS]
+state = {"proc": None, "started_at": None, "lock": threading.Lock(), "meta": {}}
+app = FastAPI(title="MediaCrawler Console")
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    # 服务启动即开始调度；不做开机自启，服务未运行期间错过的任务不补跑。
+    scheduler.start()
+
+
+@app.on_event("shutdown")
+def _stop_scheduler():
+    scheduler.shutdown()
+
+CONTENT_CN = {
+    "note_id": "笔记ID", "type": "类型", "title": "标题", "desc": "正文",
+    "video_url": "视频链接", "time": "发布时间戳", "last_update_time": "更新时间戳",
+    "creator_hash": "作者哈希", "nickname": "作者", "liked_count": "点赞数",
+    "collected_count": "收藏数", "comment_count": "评论数", "share_count": "分享数",
+    "image_list": "图片列表", "tag_list": "标签", "last_modify_ts": "数据时间戳",
+    "note_url": "原帖链接", "source_keyword": "来源关键词", "xsec_token": "访问令牌",
+    "read_count": "阅读量",
+}
+COMMENT_CN = {
+    "comment_id": "评论ID", "create_time": "评论时间戳", "note_id": "笔记ID",
+    "content": "评论内容", "creator_hash": "作者哈希", "nickname": "作者",
+    "sub_comment_count": "子评论数", "pictures": "图片", "parent_comment_id": "父评论ID",
+    "last_modify_ts": "数据时间戳", "like_count": "点赞数", "note_url": "原帖链接",
+    "user_verified": "认证标识",
+}
+
+
+def latest_rows(plat: str, kind: str):
+    files = glob.glob(str(DATA / data_dir_of(plat) / "jsonl" / f"*_{kind}_*.jsonl"))
+    if not files:
+        return []
+    f = max(files, key=os.path.getmtime)
+    rows = []
+    with open(f, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                pass
+    return rows
+
+
+def normalize_keywords(raw: str) -> str:
+    parts = [p.strip() for p in re.split(r"[,，;；\n\r]+", raw or "") if p.strip()]
+    return ",".join(parts)
+
+
+def normalize_note_urls(raw: str) -> str:
+    """归一化帖子链接：按逗号/分号/空白(含换行)拆分，只保留 http 链接，用英文逗号拼接。"""
+    parts = [p.strip() for p in re.split(r"[,，;；\s]+", raw or "") if p.strip().startswith("http")]
+    return ",".join(parts)
+
+
+def note_url_map(contents):
+    out = {}
+    for r in contents:
+        nid, u = r.get("note_id"), r.get("note_url")
+        if nid and u:
+            out[nid] = u
+    return out
+
+
+def attach_note_url(comments, mapping, platform="xhs"):
+    for r in comments:
+        nid = r.get("note_id")
+        if nid and mapping.get(nid):
+            r["note_url"] = mapping[nid]
+        elif r.get("note_url"):
+            # 评论自带的链接（如头条在采集时已写入），保留
+            pass
+        elif nid and platform == "xhs":
+            r["note_url"] = f"https://www.xiaohongshu.com/explore/{nid}"
+        else:
+            r["note_url"] = ""
+    return comments
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    # 禁缓存：确保每次打开都加载最新前端，避免用户看到旧版卡片
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+
+@app.get("/api/platforms")
+def platforms():
+    return {"platforms": [{"code": c, "name": n} for c, n in PLATFORMS]}
+
+
+@app.get("/api/login-state")
+def login_state_snapshot():
+    """读取缓存的登录态快照（不启动浏览器），供前端展示有效/失效。"""
+    return {"platforms": login_state.snapshot()}
+
+
+@app.post("/api/login-check")
+async def login_check(request: Request):
+    """实际启动浏览器体检；body 带 platform 则单平台，缺省体检全部。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    platform = body.get("platform")
+    if platform:
+        if platform not in CODES:
+            raise HTTPException(400, "bad platform")
+        await login_state.check_platform(platform)
+    else:
+        await login_state.check_all()
+    return {"ok": True, "platforms": login_state.snapshot()}
+
+
+def _normalize_window(raw_start, raw_end):
+    """即时采集时间窗：纯日期 start 补 00:00:00、end 补 23:59:59（含当天全天）。"""
+    def norm(s, is_end):
+        s = (s or "").strip()
+        if not s:
+            return ""
+        if len(s) == 10:  # YYYY-MM-DD
+            return s + (" 23:59:59" if is_end else " 00:00:00")
+        return s
+    return norm(raw_start, False), norm(raw_end, True)
+
+
+@app.post("/api/start")
+async def start(request: Request):
+    body = await request.json()
+    plat = body.get("platform")
+    mode = body.get("mode", "search")
+    if plat not in CODES:
+        raise HTTPException(400, "bad platform")
+    with state["lock"]:
+        p = state["proc"]
+        if p and p.poll() is None:
+            raise HTTPException(409, "已有采集任务正在运行")
+        # 仅小红书平台解析用户ID（小红书号）；其他平台只采集帖子，强制关闭
+        red_id_on = bool(body.get("get_red_id", True)) and plat == "xhs"
+        crawl_mode = body.get("crawl_mode", "login")
+        if crawl_mode not in ("login", "guest"):
+            raise HTTPException(400, "bad crawl_mode")
+        # 帖子/评论模式：帖子模式关闭评论与子评论，减少请求、保护账号
+        want_comments = body.get("data_mode", "content") == "comment"
+        comment_flag = "true" if want_comments else "false"
+        # 时间窗（发布时间过滤范围）
+        win_start, win_end = _normalize_window(body.get("time_start"), body.get("time_end"))
+        cmd = [VENV_PY, "main.py", "--platform", plat, "--lt", "qrcode",
+               "--crawl_mode", crawl_mode,
+               "--get_red_id", "true" if red_id_on else "false",
+               "--get_comment", comment_flag,
+               "--get_sub_comment", comment_flag,
+               "--time_start", win_start,
+               "--time_end", win_end]
+        if mode == "detail":
+            urls = normalize_note_urls(body.get("note_urls"))
+            if not urls:
+                raise HTTPException(400, "请提供有效的帖子链接")
+            cmd += ["--type", "detail", "--specified_id", urls]
+            label = urls
+        else:
+            kw = normalize_keywords(body.get("keywords"))
+            cmd += ["--type", "search"]
+            if kw:
+                cmd += ["--keywords", kw]
+            label = kw
+        DATA.mkdir(parents=True, exist_ok=True)
+        # 清理上一次的二维码状态，避免前端读到旧码
+        if QR_STATE.exists():
+            QR_STATE.unlink()
+        out = open(LOG, "w", encoding="utf-8")
+        state["proc"] = subprocess.Popen(cmd, cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT)
+        state["started_at"] = time.time()
+        state["meta"] = {"platform": plat, "data_mode": "comment" if want_comments else "content",
+                         "crawl_mode": crawl_mode, "login_only": False}
+    return {"ok": True, "pid": state["proc"].pid, "platform": plat, "mode": mode,
+            "crawl_mode": crawl_mode, "input": label}
+
+
+@app.post("/api/login")
+def login_only(request: Request):
+    """独立扫码登录：不启动采集，只拉起浏览器走登录（含扫码），成功后进程自行退出。
+
+    登录路径与真实采集完全同源（main.py --login_only），复用 qrcode 状态轮询与
+    /api/status、/api/stop，支撑前端「先登录、再采集」的独立入口。
+    """
+    import asyncio
+    async def _read():
+        try:
+            return await request.json()
+        except Exception:
+            return {}
+    body = asyncio.run(_read())
+    plat = body.get("platform")
+    if plat not in CODES:
+        raise HTTPException(400, "bad platform")
+    with state["lock"]:
+        p = state["proc"]
+        if p and p.poll() is None:
+            raise HTTPException(409, "已有任务正在运行，请先停止")
+        # 独立登录始终使用登录身份；login_only 会在登录完成后、进入采集前退出
+        cmd = [VENV_PY, "main.py", "--platform", plat, "--lt", "qrcode",
+               "--crawl_mode", "login", "--login_only", "true",
+               "--get_red_id", "false",
+               "--get_comment", "false", "--get_sub_comment", "false"]
+        DATA.mkdir(parents=True, exist_ok=True)
+        if QR_STATE.exists():
+            QR_STATE.unlink()
+        out = open(LOG, "w", encoding="utf-8")
+        state["proc"] = subprocess.Popen(cmd, cwd=str(ROOT), stdout=out, stderr=subprocess.STDOUT)
+        state["started_at"] = time.time()
+        state["meta"] = {"platform": plat, "data_mode": "content",
+                         "crawl_mode": "login", "login_only": True}
+    return {"ok": True, "pid": state["proc"].pid, "platform": plat, "login_only": True}
+
+
+@app.post("/api/stop")
+def stop():
+    p = state["proc"]
+    if QR_STATE.exists():
+        QR_STATE.unlink()
+    if p and p.poll() is None:
+        subprocess.run(["taskkill", "/PID", str(p.pid), "/T", "/F"], capture_output=True)
+        try:
+            p.wait(timeout=8)
+        except Exception:
+            p.kill()
+        return {"ok": True, "stopped": True}
+    return {"ok": True, "stopped": False}
+
+
+@app.get("/api/qrcode")
+def qrcode():
+    """读取子进程写入的二维码状态，供前端内嵌展示。"""
+    if QR_STATE.exists():
+        try:
+            return json.loads(QR_STATE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"status": "none"}
+
+
+@app.get("/api/status")
+def status():
+    # 任务路径（立即执行/定时，走 orchestrator）与即时单进程路径统一收口
+    tid = scheduler.active_task_id
+    task = task_store.get_task(tid) if tid else None
+    p = state["proc"]
+    state_running = bool(p and p.poll() is None)
+    running = bool(task) or state_running
+
+    log_lines = []
+    if task:
+        # 任务路径：读当前正在采集平台的编排日志来重建里程碑
+        cur_plat = task.get("current_platform") or (
+            task["platforms"][0] if task.get("platforms") else "")
+        meta = {"platform": cur_plat, "data_mode": task.get("data_mode", "content"),
+                "crawl_mode": task.get("crawl_mode", "login"), "login_only": False}
+        lf = DATA / f"orchestrator_{tid}_{cur_plat}.log"
+        if lf.exists():
+            log_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+    else:
+        # 即时单进程路径
+        if LOG.exists():
+            log_lines = LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+        meta = state.get("meta", {}) or {}
+
+    prog = None
+    plat_code = meta.get("platform")
+    if plat_code and log_lines:
+        from tools import progress
+        prog = progress.interpret(
+            log_lines,
+            PLAT_NAME.get(plat_code, plat_code),
+            data_mode=meta.get("data_mode", "content"),
+            crawl_mode=meta.get("crawl_mode", "login"),
+            is_login_only=meta.get("login_only", False),
+        )
+    return {"running": running, "exit_code": None, "tail": log_lines[-40:],
+            "progress": prog, "task_id": tid or "",
+            "task_name": task["name"] if task else ""}
+
+
+@app.get("/api/data")
+def data(platform: str):
+    if platform not in CODES:
+        raise HTTPException(400, "bad platform")
+    c = latest_rows(platform, "contents")
+    m = latest_rows(platform, "comments")
+    attach_note_url(m, note_url_map(c), platform)
+    return {"contents": c, "comments": m}
+
+
+def _fmt_ts(v):
+    try:
+        n = float(v)
+        if n > 1e12:
+            n /= 1000
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(n))
+    except Exception:
+        return ""
+
+
+def _link_column(ws, header_name):
+    headers = [cell.value for cell in ws[1]]
+    if header_name not in headers:
+        return
+    col = headers.index(header_name) + 1
+    for r in range(2, ws.max_row + 1):
+        cell = ws.cell(row=r, column=col)
+        if cell.value:
+            cell.hyperlink = cell.value
+            cell.style = "Hyperlink"
+
+
+@app.get("/api/export")
+def export(platform: str):
+    if platform not in CODES:
+        raise HTTPException(400, "bad platform")
+    if platform not in task_exporter.PLATFORM_META:
+        raise HTTPException(400, "该平台暂不支持导出")
+    meta = task_exporter.PLATFORM_META[platform]
+
+    # 复用定时导出器的读取/标准化（已处理平台字段差异、目录名、去重、毫秒归一化）
+    c_rows = task_exporter._read_all_rows(platform, "content")
+    m_rows = task_exporter._read_all_rows(platform, "comment")
+    c_std = task_exporter._to_standard(c_rows, meta["content"])
+    m_std = task_exporter._to_standard(m_rows, meta["comment"])
+
+    # 评论关联原帖链接
+    url_map = {str(r.get("id")): r.get("url") for r in c_std if r.get("id") and r.get("url")}
+    for r in m_std:
+        ref = str(r.get("ref_id", ""))
+        if ref in url_map:
+            r["url"] = url_map[ref]
+
+    c_df = pd.DataFrame(c_std)
+    if not c_df.empty:
+        c_df["pub_time"] = c_df["pub_ts"].apply(task_exporter._fmt_ts)
+        c_df = c_df.sort_values("pub_ts", ascending=False).drop(columns=["pub_ts"])
+        c_df = c_df.rename(columns=task_exporter.CONTENT_CN)
+        ordered = [c for c in task_exporter.CONTENT_CN.values() if c in c_df.columns]
+        c_df = c_df[ordered + [c for c in c_df.columns if c not in ordered]]
+    m_df = pd.DataFrame(m_std)
+    if not m_df.empty:
+        m_df["comment_time"] = m_df["comment_ts"].apply(task_exporter._fmt_ts)
+        m_df = m_df.sort_values("comment_ts", ascending=False).drop(columns=["comment_ts"])
+        m_df = m_df.rename(columns=task_exporter.COMMENT_CN)
+        ordered = [c for c in task_exporter.COMMENT_CN.values() if c in m_df.columns]
+        m_df = m_df[ordered + [c for c in m_df.columns if c not in ordered]]
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    seq = 1
+    while True:
+        xlsx = DATA / f"{PLAT_NAME[platform]}_{ts}_内容评论_{seq:02d}.xlsx"
+        if not xlsx.exists():
+            break
+        seq += 1
+
+    with pd.ExcelWriter(xlsx, engine="openpyxl") as w:
+        c_df.to_excel(w, sheet_name="内容", index=False)
+        m_df.to_excel(w, sheet_name="评论", index=False)
+        _link_column(w.book["内容"], "原帖链接")
+        _link_column(w.book["评论"], "原帖链接")
+    return FileResponse(xlsx, filename=xlsx.name)
+
+
+# ==================== 定时任务 API ====================
+@app.get("/api/tasks")
+def get_tasks():
+    return {"tasks": task_store.list_tasks(), "active": scheduler.active_task_id}
+
+
+@app.post("/api/tasks")
+async def create_task_api(request: Request):
+    payload = await request.json()
+    try:
+        task = task_store.create_task(payload)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # 立即执行任务：创建成功后马上触发；同一时刻只允许一个任务运行
+    if task["schedule_type"] == task_store.SCHED_IMMEDIATE:
+        if scheduler.active_task_id is not None:
+            task_store.update_task(task["id"],
+                                   {"message": "已创建，当前有任务在执行，请稍后点立即执行"})
+        else:
+            threading.Thread(target=_manual_worker, args=(task,), daemon=True).start()
+    return task
+
+
+@app.get("/api/tasks/{tid}")
+def get_task_api(tid: str):
+    t = task_store.get_task(tid)
+    if t is None:
+        raise HTTPException(404, "任务不存在")
+    return t
+
+
+@app.put("/api/tasks/{tid}")
+async def update_task_api(tid: str, request: Request):
+    changes = await request.json()
+    try:
+        return task_store.update_task(tid, changes)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/tasks/{tid}")
+def delete_task_api(tid: str):
+    if tid == scheduler.active_task_id:
+        raise HTTPException(400, "任务正在运行，请先停止再删除")
+    try:
+        task_store.delete_task(tid)
+        return {"ok": True}
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/api/tasks/{tid}/stop")
+def stop_task_api(tid: str):
+    if task_store.get_task(tid) is None:
+        raise HTTPException(404, "任务不存在")
+    orchestrator.request_stop(tid)
+    return {"ok": True, "message": "已发送停止信号"}
+
+
+@app.post("/api/tasks/{tid}/run")
+def run_task_api(tid: str):
+    t = task_store.get_task(tid)
+    if t is None:
+        raise HTTPException(404, "任务不存在")
+    if scheduler.active_task_id is not None:
+        raise HTTPException(400, "当前有任务正在执行，请稍后再试")
+    threading.Thread(target=_manual_worker, args=(t,), daemon=True).start()
+    return {"ok": True, "message": "已开始手动执行"}
+
+
+def _manual_worker(t: dict):
+    from datetime import datetime
+    from tools import time_util
+    tid = t["id"]
+    scheduler._active_task_id = tid
+    started_at = time_util.get_current_time()
+    try:
+        task_store.update_task(tid, {"status": task_store.STATUS_RUNNING,
+                                     "current_platform": "", "message": "手动执行中"})
+        # 手动立即运行：以当前时刻为执行点，按窗口时长动态回推，与定时路径同一套窗口逻辑
+        win = task_store.compute_window(t, datetime.now())
+        # 手动执行不设"到点 deadline"：所有平台跑完即止；窗口终点仅用于发布时间过滤。
+        # 若传当前时刻作为 deadline，登录体检耗时后会被判定已过期，导致一个平台都不采集。
+        exec_out = scheduler.execute_once(t, win["win_start"], win["win_end"], None)
+        if exec_out["blocked"]:
+            final_status = task_store.STATUS_FAILED
+        elif exec_out["stopped"]:
+            final_status = task_store.STATUS_STOPPED
+        else:
+            final_status = exec_out["status"]
+
+        # 与定时守护路径一致：写运行历史、清当前平台、记录导出文件
+        cur = task_store.get_task(tid)
+        history = cur.get("run_history", [])
+        history.append({
+            "run_date": datetime.now().strftime("%Y-%m-%d"),
+            "started_at": started_at,
+            "ended_at": time_util.get_current_time(),
+            "status": final_status,
+            "export_file": exec_out.get("export_path", ""),
+        })
+        export_files = cur.get("export_files", [])
+        if exec_out.get("export_path"):
+            export_files.append(exec_out["export_path"])
+
+        # 每日任务跑完回到待运行，等待下一天；单次任务保持最终状态
+        if cur["schedule_type"] == task_store.SCHED_DAILY \
+                and final_status != task_store.STATUS_STOPPED:
+            final_status = task_store.STATUS_PENDING
+        if exec_out["stopped"]:
+            msg = "已停止"
+        elif exec_out["blocked"]:
+            msg = "登录态失效，本次未采集"
+        else:
+            msg = "手动执行完成"
+        task_store.update_task(tid, {
+            "status": final_status,
+            "run_history": history,
+            "export_files": export_files,
+            "current_platform": "",
+            "message": msg,
+        })
+    except Exception as e:
+        task_store.update_task(tid, {"status": task_store.STATUS_FAILED,
+                                     "message": f"执行失败：{e}"})
+    finally:
+        scheduler._active_task_id = None
+
+
+def time_util_isots(iso):
+    from tools import time_util
+    return time_util.iso_to_ts(iso)
+
+
+@app.get("/api/tasks/{tid}/export")
+def export_task_api(tid: str):
+    t = task_store.get_task(tid)
+    if t is None:
+        raise HTTPException(404, "任务不存在")
+    try:
+        xlsx = task_exporter.export_task(tid, t["time_start"], t["time_end"])
+    except Exception as e:
+        raise HTTPException(400, f"导出失败：{e}")
+    return FileResponse(xlsx, filename=os.path.basename(xlsx))
+
+
+@app.get("/api/tasks/{tid}/logs")
+def task_logs_api(tid: str, platform: str = ""):
+    if platform:
+        log = DATA / f"orchestrator_{tid}_{platform}.log"
+        files = [log] if log.exists() else []
+    else:
+        files = sorted(glob.glob(str(DATA / f"orchestrator_{tid}_*.log")),
+                       key=os.path.getmtime)
+    text = ""
+    for f in files:
+        try:
+            with open(f, encoding="utf-8") as fh:
+                text += f"===== {os.path.basename(f)} =====\n" + fh.read()[-6000:] + "\n"
+        except OSError:
+            pass
+    return {"logs": text}
+
+
+@app.get("/api/tasks/file/{encoded_path:path}")
+def task_file_api(encoded_path: str):
+    from urllib.parse import unquote
+    raw = unquote(encoded_path)
+    target = Path(raw).resolve()
+    data_root = DATA.resolve()
+    # 路径安全：仅允许下载 data 目录内的文件，防止路径穿越
+    if data_root not in target.parents or not target.is_file():
+        raise HTTPException(404, "文件不存在或不可访问")
+    return FileResponse(target, filename=target.name)
