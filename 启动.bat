@@ -28,8 +28,10 @@ if !errorlevel!==0 (
     goto end
 )
 
-rem ===== 后台静默启动 uvicorn 服务 =====
-start "资讯采集中心服务" /min "%ROOT%\runtime\python.exe" -m uvicorn server:app --host 127.0.0.1 --port 8765
+rem ===== 后台静默启动 uvicorn 服务（兼容便携 runtime 根目录与标准 venv 两种布局）=====
+set "PYEXE=%ROOT%\runtime\python.exe"
+if not exist "%PYEXE%" set "PYEXE=%ROOT%\runtime\Scripts\python.exe"
+start "资讯采集中心服务" /min "%PYEXE%" -m uvicorn server:app --host 127.0.0.1 --port 8765
 
 rem ===== 轮询等待端口就绪（最多约 30 秒，用 ping 等待以兼容重定向环境）=====
 set /a n=0

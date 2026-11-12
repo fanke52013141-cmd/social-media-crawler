@@ -45,7 +45,26 @@ PATCHRIGHT_PLATFORMS = ("xhs", "dy", "wb", "toutiao", "ks", "bili", "tieba", "zh
 
 
 def browser_channel(platform: str):
-    """Patchright 平台返回系统真实浏览器通道（msedge），其余返回 None 走默认浏览器。"""
-    if platform in PATCHRIGHT_PLATFORMS:
+    """Patchright 平台返回系统真实浏览器通道，其余返回 None 走默认浏览器。
+    自动探测已安装的浏览器：优先 Edge，其次 Chrome；都没有则回退自带 Chromium，
+    避免硬编码 msedge 在未装 Edge 的机器上直接启动失败。"""
+    if platform not in PATCHRIGHT_PLATFORMS:
+        return None
+    import os
+    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LOCALAPPDATA", "")
+    edge_paths = [
+        os.path.join(pf86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
+    ]
+    chrome_paths = [
+        os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(pf86, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
+    ]
+    if any(os.path.exists(p) for p in edge_paths):
         return "msedge"
+    if any(os.path.exists(p) for p in chrome_paths):
+        return "chrome"
     return None
