@@ -157,27 +157,34 @@ class Scheduler:
                      "stopped": False, "blocked": False, "result": None}
         orchestrator.clear_stop(tid)
 
-        # 任务前登录体检
+        # 任务前登录体检：失效平台跳过并继续其余平台，只有全部失效才整体失败
         login_ok = self._preflight_login(task)
         invalid = [p for p, ok in login_ok.items() if not ok]
+        run_platforms = [p for p in task["platforms"] if p not in invalid]
+        out["skipped"] = invalid
         if invalid:
             from tools import login_state
             names = [login_state.PLATFORM_LOGIN_INFO[p]["name"] for p in invalid]
-            out["status"] = task_store.STATUS_FAILED
-            out["blocked"] = True
             for p in invalid:
                 task_store.update_platform_status(tid, p, {
                     "status": "failed",
                     "contents": 0,
                     "comments": 0,
-                    "message": "登录态失效，请先扫码",
+                    "message": "登录态失效，本轮跳过，请先扫码",
                 })
+            if not run_platforms:
+                out["status"] = task_store.STATUS_FAILED
+                out["blocked"] = True
+                task_store.update_task(tid, {
+                    "message": f"登录态失效（{'、'.join(names)}），请先扫码后再运行，本次未采集"
+                })
+                return out
             task_store.update_task(tid, {
-                "message": f"登录态失效（{'、'.join(names)}），请先扫码后再运行，本次未采集"
+                "message": f"{'、'.join(names)}登录态失效已跳过，继续采集其余平台"
             })
-            return out
 
-        result = orchestrator.run_once(task, win_start, win_end, deadline_ts)
+        result = orchestrator.run_once(task, win_start, win_end, deadline_ts,
+                                       platforms=run_platforms)
         out["result"] = result
         if result["stopped"]:
             out["status"] = task_store.STATUS_STOPPED
@@ -240,12 +247,21 @@ class Scheduler:
                 final_status = task_store.STATUS_PENDING
             else:
                 final_status = overall_status
+            base_msg = "已停止" if overall_status == task_store.STATUS_STOPPED else "本轮完成"
+            skipped = exec_out.get("skipped") or []
+            if skipped:
+                from tools import login_state
+                snames = [login_state.PLATFORM_LOGIN_INFO[p]["name"] for p in skipped]
+                base_msg += f"（{'、'.join(snames)}登录态失效已跳过）"
             task_store.update_task(task_id, {
                 "status": final_status,
                 "run_history": history,
                 "export_files": export_files,
                 "current_platform": "",
-                "message": "已停止" if overall_status == task_store.STATUS_STOPPED else "本轮完成",
+                # 写回本轮真实窗口：卡片显示与「导出」按钮跟上最新一轮（每日任务随日期滚动）
+                "time_start": due["win_start"],
+                "time_end": due["win_end"],
+                "message": base_msg,
             })
         except Exception as e:
             print(f"[Scheduler] worker error: {e}")

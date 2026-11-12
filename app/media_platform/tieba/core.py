@@ -23,7 +23,7 @@ import os
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple
 
-from playwright.async_api import (
+from patchright.async_api import (
     BrowserContext,
     BrowserType,
     Page,
@@ -36,7 +36,8 @@ from base.base_crawler import AbstractCrawler
 from model.m_baidu_tieba import TiebaCreator, TiebaNote
 from proxy.proxy_ip_pool import IpInfoModel, ProxyIpPool, create_ip_pool
 from store import tieba as tieba_store
-from tools import utils
+from tools import qr_state, utils, browser_launch
+from tools.login_state import mark_logged_in
 from tools.cdp_browser import CDPBrowserManager
 from var import crawler_type_var, source_keyword_var
 
@@ -126,10 +127,16 @@ class TieBaCrawler(AbstractCrawler):
                     cookie_str=config.COOKIES,
                 )
                 await login_obj.begin()
+                mark_logged_in(config.PLATFORM)
                 await self.tieba_client.update_cookies(
                     browser_context=self.browser_context,
                     urls=self.cookie_urls,
                 )
+            else:
+                # 已登录、无需扫码：写 success 让前端浮层以成功态关闭（避免「二维码取不到就关闭」的困惑），
+                # 并校正可能过期的缓存，保证前端圆点即时变绿
+                qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
+                mark_logged_in(config.PLATFORM)
 
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[Crawler.start] login-only mode, finished after login, skip crawling")
@@ -625,11 +632,12 @@ class TieBaCrawler(AbstractCrawler):
             browser_context = await chromium.launch_persistent_context(
                 user_data_dir=guest_dir,
                 accept_downloads=True,
-                headless=headless,
+                headless=browser_launch.effective_headless(config.PLATFORM, headless),
                 proxy=playwright_proxy,  # type: ignore
                 viewport={"width": 1920, "height": 1080},
                 user_agent=user_agent,
-                channel="chrome",
+                channel=browser_launch.browser_channel(config.PLATFORM),
+                args=browser_launch.offscreen_args(config.PLATFORM),
             )
             return browser_context
         if config.SAVE_LOGIN_STATE:
@@ -641,15 +649,16 @@ class TieBaCrawler(AbstractCrawler):
             browser_context = await chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 accept_downloads=True,
-                headless=headless,
+                headless=browser_launch.effective_headless(config.PLATFORM, headless),
                 proxy=playwright_proxy,  # type: ignore
                 viewport={"width": 1920, "height": 1080},
                 user_agent=user_agent,
-                channel="chrome",  # Use system's stable Chrome version
+                channel=browser_launch.browser_channel(config.PLATFORM),
+                args=browser_launch.offscreen_args(config.PLATFORM),
             )
             return browser_context
         else:
-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel="chrome")  # type: ignore
+            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, channel=browser_launch.browser_channel(config.PLATFORM))  # type: ignore
             browser_context = await browser.new_context(
                 viewport={"width": 1920, "height": 1080}, user_agent=user_agent
             )

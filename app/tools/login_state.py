@@ -193,60 +193,74 @@ async def check_platform(platform: str, headless: bool = False) -> Dict:
 
     launch_args = ["--disable-blink-features=AutomationControlled"]
     if not headless:
-        # 离屏有头：窗口移出可见区域，用户看不到但浏览器是完整 Chrome
-        launch_args += ["--window-position=-32000,-32000", "--window-size=1440,900"]
+        # 离屏有头：窗口移出可见区域，用户看不到但浏览器是完整 Chrome；
+        # 「显示浏览器窗口」打开时不做离屏，窗口可见。
+        from tools import settings
+        if not settings.browser_visible():
+            launch_args += ["--window-position=-32000,-32000", "--window-size=1440,900"]
 
-    try:
-        async with async_playwright() as p:
-            context = await p.chromium.launch_persistent_context(
-                user_data_dir=profile,
-                headless=headless,
-                accept_downloads=True,
-                args=launch_args,
-            )
-            try:
-                page = context.pages[0] if context.pages else await context.new_page()
-                await page.goto(info["url"], wait_until="domcontentloaded", timeout=30000)
+    last_err: Optional[Exception] = None
+    for _attempt in range(2):
+        try:
+            async with async_playwright() as p:
+                context = await p.chromium.launch_persistent_context(
+                    user_data_dir=profile,
+                    headless=headless,
+                    accept_downloads=True,
+                    args=launch_args,
+                )
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=6000)
-                except Exception:
-                    pass
-                cookies = await context.cookies()
-                cookie_dict = {c.get("name"): c.get("value") for c in cookies}
-                hit_key = next((k for k in info["cookie_keys"] if cookie_dict.get(k)), None)
-
-                storage_ok = False
-                if info["local_storage"]:
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    await page.goto(info["url"], wait_until="domcontentloaded", timeout=30000)
                     try:
-                        ls = await page.evaluate("() => window.localStorage")
-                        storage_ok = ls.get(info["local_storage"], "") == "1"
+                        await page.wait_for_load_state("networkidle", timeout=6000)
                     except Exception:
-                        storage_ok = False
+                        pass
+                    cookies = await context.cookies()
+                    cookie_dict = {c.get("name"): c.get("value") for c in cookies}
+                    hit_key = next((k for k in info["cookie_keys"] if cookie_dict.get(k)), None)
 
-                if hit_key or storage_ok:
-                    if platform == "xhs":
-                        # 游客也有临时 web_session，需服务端业务码二次确认
-                        verified = await _xhs_server_verify(context, page)
-                        if verified is False:
-                            result["logged_in"] = False
-                            result["detail"] = "登录已失效（当前为游客临时会话），请重新扫码"
-                        elif verified is True:
+                    storage_ok = False
+                    if info["local_storage"]:
+                        try:
+                            ls = await page.evaluate("() => window.localStorage")
+                            storage_ok = ls.get(info["local_storage"], "") == "1"
+                        except Exception:
+                            storage_ok = False
+
+                    if hit_key or storage_ok:
+                        if platform == "xhs":
+                            # 游客也有临时 web_session，需服务端业务码二次确认
+                            verified = await _xhs_server_verify(context, page)
+                            if verified is False:
+                                result["logged_in"] = False
+                                result["detail"] = "登录已失效（当前为游客临时会话），请重新扫码"
+                            elif verified is True:
+                                result["logged_in"] = True
+                                result["detail"] = "登录有效"
+                            else:
+                                # 校验流程异常，回退 cookie 判断，避免误拦
+                                result["logged_in"] = True
+                                result["detail"] = "登录有效（服务端校验未完成，按缓存结论）"
+                        else:
                             result["logged_in"] = True
                             result["detail"] = "登录有效"
-                        else:
-                            # 校验流程异常，回退 cookie 判断，避免误拦
-                            result["logged_in"] = True
-                            result["detail"] = "登录有效（服务端校验未完成，按缓存结论）"
                     else:
-                        result["logged_in"] = True
-                        result["detail"] = "登录有效"
-                else:
-                    result["logged_in"] = False
-                    result["detail"] = "登录已失效，请重新扫码"
-            finally:
-                await context.close()
-    except Exception as e:
-        result["detail"] = f"体检异常：{e}"
+                        result["logged_in"] = False
+                        result["detail"] = "登录已失效，请重新扫码"
+                finally:
+                    await context.close()
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+
+    if last_err is not None:
+        # 体检异常（网络抖动/导航中断等）≠ 登录失效：沿用上次缓存结论，
+        # 避免把健康平台误判为失效而跳过整个平台的采集。
+        cached = read_state().get(platform, {})
+        result["logged_in"] = bool(cached.get("logged_in"))
+        result["detail"] = f"体检异常（沿用上次结论）：{last_err}"
 
     _merge(platform, result)
     return result

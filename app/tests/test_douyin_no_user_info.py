@@ -5,8 +5,8 @@
 
 教学版约定:用户 ID(uid/sec_uid/short_user_id/user_unique_id)/IP/头像/签名/性别
 一律不持久化;原始 uid 经 tools.user_hash.anonymize_user_id 转成 creator_hash
-(sha256 截断 16 位)写入;昵称保留但经 mask_nickname 中间脱敏。desc(作品描述)是
-内容字段,保留。
+(sha256 截断 16 位)写入;昵称完整保留(本地资讯采集中心口径,不做中间脱敏)。
+desc(作品描述)是内容字段,保留。
 
 覆盖:
 1. test_douyin_aweme_masks_user_info
@@ -198,9 +198,9 @@ def test_douyin_aweme_masks_user_info():
     assert captured.get("creator_hash")
     assert captured["creator_hash"] != raw_uid
     assert captured["creator_hash"] == anonymize_user_id(raw_uid)
-    # 4. nickname 保留但脱敏,≠原文,与 mask_nickname 一致
+    # 4. nickname 完整保留(本地口径),与 mask_nickname 一致
     assert captured.get("nickname")
-    assert captured["nickname"] != raw_nick
+    assert captured["nickname"] == raw_nick
     assert captured["nickname"] == mask_nickname(raw_nick)
     # 5. 内容字段保留(desc/title 是作品描述,不禁用)
     assert captured.get("desc") == aweme["desc"]
@@ -250,7 +250,7 @@ def test_douyin_comment_masks_user_info():
     assert captured["creator_hash"] != raw_uid
     assert captured["creator_hash"] == anonymize_user_id(raw_uid)
     assert captured.get("nickname")
-    assert captured["nickname"] != raw_nick
+    assert captured["nickname"] == raw_nick
     assert captured["nickname"] == mask_nickname(raw_nick)
 
     # 评论内容/ID 保留
@@ -286,7 +286,7 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     assert obj.creator_hash == anonymize_user_id(raw_uid)
     assert obj.creator_hash != raw_uid
     assert obj.nickname == mask_nickname(raw_nick)
-    assert obj.nickname != raw_nick
+    assert obj.nickname == raw_nick
     assert obj.title == aweme["desc"]
     assert obj.desc == aweme["desc"]
     _assert_no_forbidden(captured, "douyin_aweme_orm_construct")
@@ -324,7 +324,7 @@ def test_douyin_store_end_to_end_sqlite(monkeypatch):
     assert row.creator_hash == anonymize_user_id(raw_uid)
     assert row.creator_hash != raw_uid
     assert row.nickname == mask_nickname(raw_nick)
-    assert row.nickname != raw_nick
+    assert row.nickname == raw_nick
     assert row.desc == aweme["desc"]
     assert row.title == aweme["desc"]
     assert row.cover_url == "http://x/cover.jpg"

@@ -412,7 +412,11 @@ async def parse_cmd(argv: Optional[Sequence[str]] = None):
         config.CRAWL_MODE = crawl_mode.value
         config.CRAWLER_TYPE = crawler_type.value
         config.START_PAGE = start
-        config.KEYWORDS = keywords
+        # 关键词归一化：全角逗号/分号/空白统一拆分为英文逗号分隔，
+        # 保证各平台 split(",") 逐词搜索（否则整串当一个词，搜不到且来源关键词对不上导出过滤）
+        config.KEYWORDS = ",".join(
+            k.strip() for k in re.split(r"[,，;；\s]+", keywords or "") if k.strip()
+        )
         config.ENABLE_GET_COMMENTS = enable_comment
         config.ENABLE_GET_SUB_COMMENTS = enable_sub_comment
         config.ENABLE_GET_RED_ID = enable_red_id

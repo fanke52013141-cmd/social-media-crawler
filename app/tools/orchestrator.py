@@ -107,16 +107,16 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
             return {"status": "stopped", "contents": 0, "comments": 0, "message": "已手动停止"}
         time.sleep(2)
 
-    # 本任务在该平台、窗口内、关键词下、去重后的总条数（与导出口径一致）
-    total_c, total_m = task_exporter.count_task_rows(task, platform)
+    # 本任务在该平台、本轮窗口内、关键词下、去重后的总条数（与导出口径一致）
+    total_c, total_m = task_exporter.count_task_rows(task, platform, win_start, win_end)
     # 统计本轮高危风控信号（验证码/账号安全限制），达到阈值即触发冷却
     high_risk = risk_signals.count_high_risk(platform, run_start_ts)
     if high_risk >= risk_signals.HIGH_RISK_THRESHOLD or (rc != 0 and high_risk > 0):
-        cooldown = random.randint(risk_signals.COOLDOWN_MIN, risk_signals.COOLDOWN_MAX)
-        risk_signals.set_cooldown(platform, cooldown,
-                                  f"本轮高危信号 {high_risk} 次，退出码 {rc}")
+        cooldown = risk_signals.escalating_cooldown(
+            platform, f"本轮高危信号 {high_risk} 次，退出码 {rc}")
         status = "blocked"
-        msg = f"检测到 {high_risk} 次风控信号，已自动冷却约 {cooldown // 60} 分钟以保护账号"
+        dur = f"{cooldown // 3600} 小时" if cooldown >= 3600 else f"{cooldown // 60} 分钟"
+        msg = f"检测到 {high_risk} 次风控信号，已自动冷却 {dur} 以保护账号（24小时内再犯升级）"
     elif rc == 0:
         status = "done"
         if task["data_mode"] == task_store.DATA_COMMENT:
@@ -128,15 +128,17 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
     return {"status": status, "contents": total_c, "comments": total_m, "message": msg}
 
 
-def run_once(task: Dict, win_start: str, win_end: str, deadline_ts: Optional[int] = None) -> Dict:
+def run_once(task: Dict, win_start: str, win_end: str, deadline_ts: Optional[int] = None,
+             platforms: Optional[list] = None) -> Dict:
     """执行一轮：逐平台串行，平台间休息。返回本轮整体结果。
 
     deadline_ts：正常到点收尾的截止时间戳。到达后不再启动新平台，当前平台跑完即结束；
     与用户手动停止（_stop_flags，立即终止当前平台）相区别。
+    platforms：本轮实际执行的平台子集（登录体检失效的平台已被剔除）；缺省为任务全部平台。
     """
     task_id = task["id"]
     results: Dict[str, Dict] = {}
-    platforms = task["platforms"]
+    platforms = platforms if platforms is not None else task["platforms"]
     total = len(platforms)
 
     consecutive_fail = 0

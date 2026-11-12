@@ -60,6 +60,22 @@ PLATFORM_META = {
             "note_id": "ref_id",
         },
     },
+    # 字段名以真实 jsonl 样本确认（data/toutiao/jsonl/，2026-11-10）。
+    # 头条内容不含点赞/收藏/评论/转发计数字段，Excel 对应列自然缺省，属平台数据限制。
+    "toutiao": {
+        "name": "今日头条",
+        "content": {
+            "note_id": "id", "type": "item_type", "title": "title", "desc": "desc",
+            "time": "pub_ts", "nickname": "nickname", "note_url": "url",
+            "source_keyword": "source_keyword",
+        },
+        "comment": {
+            "comment_id": "comment_id", "create_time": "comment_ts", "content": "content",
+            "nickname": "nickname", "like_count": "like_count",
+            "sub_comment_count": "sub_count", "parent_comment_id": "parent_id",
+            "note_id": "ref_id", "note_url": "url",
+        },
+    },
 }
 
 # ---------------- 标准字段 -> 中文列 ----------------
@@ -186,9 +202,9 @@ def _build_comment_df(platform: str, win_lo: Optional[int], win_hi: Optional[int
         if win_hi is not None and t > win_hi:
             continue
         r["comment_time"] = _fmt_ts(ts)
-        # 关联原帖链接
+        # 关联原帖链接：优先用本任务采到的帖子链接；缺失时回退评论自带的链接（如头条）
         ref = str(r.get("ref_id", ""))
-        r["url"] = content_url_map.get(ref, "")
+        r["url"] = content_url_map.get(ref) or r.get("url", "")
         filtered.append(r)
     df = pd.DataFrame(filtered)
     if not df.empty and "comment_ts" in df.columns:
@@ -209,16 +225,22 @@ def _add_hyperlinks(ws, col_name: str) -> None:
             cell.style = "Hyperlink"
 
 
-def count_task_rows(task: Dict, platform: str) -> Tuple[int, int]:
+def count_task_rows(task: Dict, platform: str,
+                    win_start: Optional[str] = None,
+                    win_end: Optional[str] = None) -> Tuple[int, int]:
     """统计本任务在某平台、窗口内、关键词下、去重后的总条数（帖子, 评论）。
 
     过滤口径与 export_task 完全一致，保证卡片上的总数和点「导出」看到的行数对得上。
+    win_start/win_end 显式传入时优先使用（每日任务运行中用本轮真实窗口，
+    避免读到创建时/上一轮的旧窗口）；缺省回退任务存储窗口。
     """
     meta = PLATFORM_META.get(platform)
     if meta is None:
         return (0, 0)
-    win_lo = time_util.iso_to_ts(str(task.get("time_start", "") or ""))
-    win_hi = time_util.iso_to_ts(str(task.get("time_end", "") or ""))
+    ws = task.get("time_start", "") if win_start is None else win_start
+    we = task.get("time_end", "") if win_end is None else win_end
+    win_lo = time_util.iso_to_ts(str(ws or ""))
+    win_hi = time_util.iso_to_ts(str(we or ""))
     allowed = _task_keyword_set(task)
 
     def in_window(ts) -> bool:
@@ -263,6 +285,8 @@ def export_task(task_id: str, win_start: str, win_end: str) -> str:
     # 评论模式需要帖子链接映射（用于关联原帖）
     content_url_by_platform: Dict[str, Dict[str, str]] = {}
     for p in task["platforms"]:
+        if p not in PLATFORM_META:
+            continue  # 未适配平台不参与链接映射，也不阻断导出
         content_rows = _read_all_rows(p, "content")
         m = PLATFORM_META[p]
         url_map = {}
@@ -285,6 +309,11 @@ def export_task(task_id: str, win_start: str, win_end: str) -> str:
     cn_map = CONTENT_CN if kind == "content" else COMMENT_CN
     with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
         for platform in task["platforms"]:
+            if platform not in PLATFORM_META:
+                # 未适配平台：写提示 sheet，不阻断其余平台导出（与「单平台失效不停整个任务」一致）
+                note = pd.DataFrame({"说明": [f"平台 {platform} 字段映射尚未适配，数据未纳入导出"]})
+                note.to_excel(writer, sheet_name=platform, index=False)
+                continue
             if kind == "content":
                 df = _build_content_df(platform, win_lo, win_hi, allowed_keywords)
                 link_col = "原帖链接"

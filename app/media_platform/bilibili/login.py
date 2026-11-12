@@ -24,7 +24,6 @@
 # @Desc    : bilibili login implementation class
 
 import asyncio
-import functools
 import sys
 from typing import Optional
 
@@ -35,7 +34,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 
 import config
 from base.base_crawler import AbstractLogin
-from tools import utils
+from tools import utils, qr_state
 
 # B 站首页 header 目前新旧两套实现并行灰度，未登录时的登录入口选择器不同：
 # - 新版 header：.header-avatar-unlogin-entry
@@ -142,17 +141,17 @@ class BilibiliLogin(AbstractLogin):
             utils.logger.info("[BilibiliLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
             sys.exit()
 
-        # show login qrcode
-        partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
-
-        utils.logger.info(f"[BilibiliLogin.login_by_qrcode] Waiting for scan code login, remaining time is 20s")
+        # 内嵌展示二维码：写入状态供工作台浮层轮询，不弹任何系统窗口
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_WAITING, base64_qrcode_img)
+        utils.logger.info("[BilibiliLogin.login_by_qrcode] 请使用「哔哩哔哩 App」扫码，等待中...")
         try:
             await self.check_login_state()
         except RetryError:
+            qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_TIMEOUT)
             utils.logger.info("[BilibiliLogin.login_by_qrcode] Login bilibili failed by qrcode login method ...")
             sys.exit()
 
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
         wait_redirect_seconds = 5
         utils.logger.info(
             f"[BilibiliLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")

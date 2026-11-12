@@ -117,28 +117,8 @@
   .switch input:checked + .slider{background:var(--brand)}
   .switch input:checked + .slider::before{transform:translateX(18px)}
 
-  /* result */
-  .result-head{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px}
-  .tabs{display:flex;gap:8px}
-  .tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;cursor:pointer;
-    font-size:13px;font-weight:600;color:var(--body);font-family:inherit}
-  .tabs button.on{background:var(--ink);color:#fff;border-color:var(--ink)}
-  .spacer{margin-left:auto;display:flex;gap:9px}
-  .table-scroll{max-height:600px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff}
-  table{width:100%;border-collapse:collapse;font-size:13px}
-  th,td{padding:9px 12px;border-bottom:1px solid var(--line-soft);text-align:left;vertical-align:top}
-  th{background:var(--fill);color:var(--sub);font-size:12px;font-weight:700;position:sticky;top:0;z-index:5;white-space:nowrap}
-  tbody tr:hover{background:var(--fill)}
   a{color:var(--brand);text-decoration:none;font-weight:600}
   a:hover{text-decoration:underline}
-  .thumb{width:48px;height:60px;object-fit:cover;border-radius:var(--r-sm);background:var(--line-soft)}
-  .t-title{font-weight:700;color:var(--ink)}
-  .t-desc{color:var(--sub);font-size:12px;max-width:300px;margin-top:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-  .pill{display:inline-block;background:var(--fill);border:1px solid var(--line);border-radius:999px;font-size:11px;color:var(--sub);padding:2px 8px;margin:4px 4px 0 0}
-  .num{white-space:nowrap;color:var(--body);font-size:12.5px}
-  .idx{text-align:center;color:var(--sub);font-weight:600}
-  .full-link{font-size:11px;font-weight:500;word-break:break-all;line-height:1.45;min-width:200px}
-  .empty{padding:40px;text-align:center;color:var(--sub);font-weight:600}
 
   /* log terminal (light, harmonized) */
   .term{background:#fff;border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;margin-top:12px}
@@ -288,7 +268,6 @@
   .btn-mini{border:1px solid var(--line);background:#fff;border-radius:var(--r-md);padding:6px 13px;
     font-size:12.5px;font-weight:600;color:var(--body);cursor:pointer;font-family:inherit;transition:.15s}
   .btn-mini:hover{border-color:var(--brand);color:var(--brand)}
-  #viewPlats{gap:6px}#viewPlats .plat{padding:6px 12px;font-size:12.5px}
   input[type=time],input[type=datetime-local],input[type=date]{font-family:inherit}
   #dailyWrap{display:none;align-items:center;gap:14px;flex-wrap:wrap}
   #onceWrap{display:none}
@@ -299,6 +278,10 @@
   <div class="h-inner">
     <div class="logo">M</div>
     <div class="h-title">资讯采集中心</div>
+    <label class="switch-wrap" style="margin-left:auto" title="打开后，采集/登录/体检的浏览器窗口会显示在屏幕上（下次启动浏览器生效）；默认关闭，静默采集不占屏幕">
+      <span class="switch"><input type="checkbox" id="visibleToggle"><span class="slider"></span></span>
+      显示浏览器窗口
+    </label>
     <div class="dotline"><span class="pulse"><span></span><span></span></span><span class="txt">服务正常</span></div>
   </div>
 </header>
@@ -407,6 +390,15 @@
             </div>
           </div>
         </div>
+        <div id="dayModeWrap" style="display:none">
+          <div class="step-seg" id="dayModeSeg">
+            <button class="on" data-wm="today">当天</button>
+            <button data-wm="rolling">近 N 天</button>
+          </div>
+          <div class="hint-box info" id="todayHint" style="margin-top:10px">
+            <span>每天自动采集当天 00:00 至 23:59 发布的内容，窗口随日期自动滚动，无需手动改时间。</span>
+          </div>
+        </div>
         <div id="windowSegWrap" style="display:none">
           <div class="step-seg" id="windowSeg">
             <button data-w="24">近24小时</button>
@@ -443,21 +435,6 @@
     <div class="task-list" id="taskList" style="margin-top:0"></div>
   </div>
 
-  <!-- ============ 数据查看 ============ -->
-  <div class="card">
-    <div class="result-head">
-      <div class="plats" id="viewPlats"></div>
-      <div class="tabs" id="viewTabs">
-        <button class="on" data-t="contents">帖子 <span id="cCnt">0</span></button>
-        <button data-t="comments">评论 <span id="mCnt">0</span></button>
-      </div>
-      <div class="spacer">
-        <button class="btn ghost" id="refreshBtn">刷新</button>
-        <button class="btn primary" id="exportBtn">导出 Excel</button>
-      </div>
-    </div>
-    <div class="table-scroll" style="max-height:560px;border:none"><div id="data"></div></div>
-  </div>
 </main>
 
 <!-- ============ 扫码登录浮层 ============ -->
@@ -478,19 +455,13 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const ds=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate());
 const addDS=n=>{const d=new Date();d.setDate(d.getDate()+n);return ds(d);};
 const todayDS=()=>ds(new Date());
-const fmt=v=>{let n=Number(v);if(!n)return'';if(n>1e12)n/=1000;const d=new Date(n*1000);return ds(d)+' '+pad(d.getHours())+':'+pad(d.getMinutes());};
-const toArr=s=>String(s||'').split(/[,，、\s]+/).filter(Boolean);
-const img=list=>Array.isArray(list)?(list[0]||''):'';
 const dtLocal=d=>d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+'T'+pad(d.getHours())+':'+pad(d.getMinutes());
 
 /* ==================== 统一表单状态 ==================== */
 const F={trigger:'immediate',crawl:'login',dataMode:'content',target:'search',
-         windowHours:168,plats:new Set(),range:{d0:'',d1:''}};
+         windowHours:168,windowMode:'today',plats:new Set(),range:{d0:'',d1:''}};
 let TASK_PLATS=[];
 let loginStates={};
-let viewPlat='xhs';
-let viewTabSel='contents';
-let contents=[],comments=[];
 let pendingLoginPlat='';
 
 const STATUS_TEXT={pending:'待运行',running:'运行中',done:'已完成',failed:'失败',stopped:'已停止'};
@@ -517,14 +488,6 @@ function renderFormPlats(){
     el.classList.toggle('on');refreshIdentity();
   });
 }
-function renderViewPlats(){
-  $('#viewPlats').innerHTML=TASK_PLATS.map(([code,name])=>
-    `<span class="plat ${viewPlat===code?'on':''}" data-c="${code}">${name}</span>`).join('');
-  $('#viewPlats').querySelectorAll('.plat').forEach(el=>el.onclick=()=>{
-    viewPlat=el.dataset.c;renderViewPlats();loadData();
-  });
-}
-
 /* ==================== 登录态 ==================== */
 async function loadLoginState(){
   try{
@@ -552,18 +515,43 @@ function refreshIdentity(){
     $('#guestHintText').textContent='游客模式不使用账号、不扫码，仅采集公开可见内容，零账号风险；批量与深度受限，部分平台不支持关键词搜索。';
   }
 }
-/* 独立扫码登录：只登录不采集，优先给第一个未登录的选中平台 */
+/* 独立扫码登录：多选平台时按顺序逐个扫码（扫完自动切换下一个），只登录不采集 */
+let loginQueue=[];        // 待登录平台队列（队首为当前）
+let loginTotal=0;         // 本轮登录流程平台总数（用于进度展示）
+let loginSwitching=false; // 平台切换过渡期：禁止浮层兜底自动关闭
+let loginAdvancing=false; // 成功→切换处理中：防止轮询重入
+
+async function waitLoginIdle(timeoutMs=15000){
+  const end=Date.now()+timeoutMs;
+  while(Date.now()<end){
+    const st=await(await fetch('/api/status')).json();
+    if(!st.running)return true;
+    await new Promise(r=>setTimeout(r,1000));
+  }
+  return false;
+}
+async function startNextLogin(){
+  if(!loginQueue.length){loginTotal=0;closeQrDialog();return;}
+  loginSwitching=true;
+  await waitLoginIdle();  // 上一个登录进程有 5 秒收尾，等它退出再启动下一个
+  loginSwitching=false;
+  const target=loginQueue[0];
+  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platform:target})});
+  if(!r.ok){alert('启动登录失败：'+(await r.text()));loginQueue=[];loginTotal=0;closeQrDialog();return;}
+  pendingLoginPlat=target;
+  openQrDialog(target);
+}
 async function loginOnly(){
   const st=await(await fetch('/api/status')).json();
   if(st.running){alert('当前有任务正在运行，请先停止');return;}
   const sel=Array.from(F.plats);
   if(!sel.length){alert('请先选择要登录的平台');return;}
-  const target=sel.find(c=>!(loginStates[c]||{}).logged_in)||sel[0];
-  const r=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({platform:target})});
-  if(!r.ok){alert('启动登录失败：'+(await r.text()));return;}
-  pendingLoginPlat=target;
-  openQrDialog(target);
+  await loadLoginState();
+  const queue=sel.filter(c=>!(loginStates[c]||{}).logged_in);
+  if(!queue.length){alert('所选平台均已登录，无需扫码');renderFormPlats();refreshIdentity();return;}
+  loginQueue=queue;loginTotal=queue.length;
+  await startNextLogin();
 }
 $('#loginOnlyBtn').onclick=loginOnly;
 
@@ -600,9 +588,12 @@ function refreshTrigger(){
   const t=F.trigger;
   $('#onceWrap').style.display=t==='once'?'block':'none';
   $('#dailyWrap').style.display=t==='daily'?'flex':'none';
-  // 立即执行用绝对时间范围；定时任务用相对窗口（近N小时）
-  $('#rangeWrap').style.display=t==='immediate'?'block':'none';
-  $('#windowSegWrap').style.display=t==='immediate'?'none':'block';
+  // 立即/单次用创建时固定的绝对日期区间；每日默认采当天，可选近N小时滚动
+  $('#rangeWrap').style.display=t==='daily'?'none':'block';
+  $('#dayModeWrap').style.display=t==='daily'?'block':'none';
+  const rolling=t==='daily'&&F.windowMode==='rolling';
+  $('#windowSegWrap').style.display=rolling?'block':'none';
+  $('#todayHint').classList.toggle('show',t==='daily'&&F.windowMode==='today');
   $('#submitBtn').textContent=t==='immediate'?'立即开始':'创建任务';
 }
 
@@ -618,6 +609,7 @@ bindSeg('#trigSeg','trigger','t',refreshTrigger);
 bindSeg('#crawlSeg','crawl','c',refreshIdentity);
 bindSeg('#dataSeg','dataMode','d',refreshDataMode);
 bindSeg('#targetSeg','target','m',refreshTarget);
+bindSeg('#dayModeSeg','windowMode','wm',refreshTrigger);
 $('#windowSeg').querySelectorAll('button').forEach(b=>b.onclick=()=>{
   F.windowHours=parseInt(b.dataset.w,10);
   $('#windowSeg').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
@@ -675,14 +667,15 @@ async function submit(){
     input_type:F.target==='search'?'keyword':'detail',
     schedule_type:F.trigger,
     run_time:runTime,
-    window_hours:F.windowHours
+    window_hours:F.windowHours,
+    window_mode:F.windowMode
   };
   if(F.target==='search'){
     payload.keywords=$('#kwInput').value.trim();
   }else{
     payload.note_urls=$('#linkArea').value.trim();
   }
-  if(F.trigger==='immediate'){
+  if(F.trigger!=='daily'){
     if(F.range.d0)payload.time_start=F.range.d0+' 00:00:00';
     if(F.range.d1)payload.time_end=F.range.d1+' 23:59:59';
   }
@@ -702,12 +695,13 @@ function resetForm(){
   $('#fName').value='';$('#kwInput').value='';$('#linkArea').value='';
   $('#repeatEnd').value='';clearErr();
   F.trigger='immediate';F.crawl='login';F.dataMode='content';F.target='search';
-  F.windowHours=168;F.plats.clear();F.range={d0:'',d1:''};
+  F.windowHours=168;F.windowMode='today';F.plats.clear();F.range={d0:'',d1:''};
   $('#trigSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.t==='immediate'));
   $('#crawlSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.c==='login'));
   $('#dataSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.d==='content'));
   $('#targetSeg').querySelectorAll('button').forEach(b=>{b.disabled=false;b.classList.toggle('on',b.dataset.m==='search');});
   $('#windowSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.w==='168'));
+  $('#dayModeSeg').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.wm==='today'));
   const s=new Date();s.setDate(s.getDate()+1);s.setHours(9,0,0,0);
   $('#onceTime').value=dtLocal(s);$('#dailyTime').value='09:00';
   $('#d0').value='';$('#d1').value='';paintRange();
@@ -719,10 +713,13 @@ $('#resetBtn').onclick=resetForm;
 let qrTimer=null;
 function openQrDialog(platCode){
   const name=(pn()[platCode]||platCode)+' App';
-  $('#qrDialogTitle').textContent='扫码登录';
-  $('#qrTip').innerHTML=`请使用「${name}」扫码，二维码过期会<b>自动刷新</b>`;
+  const done=loginTotal-loginQueue.length;
+  const prog=loginTotal>1?`（${done+1}/${loginTotal}）`:'';
+  $('#qrDialogTitle').textContent='扫码登录'+prog;
+  const nextTip=(loginTotal>1&&loginQueue.length>1)?`<br>扫完自动切换下一个平台（还剩 ${loginQueue.length-1} 个）`:'';
+  $('#qrTip').innerHTML=`请使用「${name}」扫码，二维码过期会<b>自动刷新</b>${nextTip}`;
   $('#qrImg').style.display='none';$('#qrImg').src='';
-  $('#qrLoading').style.display='inline';
+  $('#qrLoading').style.display='inline';$('#qrLoading').textContent='二维码加载中…';
   $('#qrOverlay').classList.add('show');
   pollQr();
   if(qrTimer)clearInterval(qrTimer);
@@ -733,11 +730,26 @@ function closeQrDialog(){
   if(qrTimer){clearInterval(qrTimer);qrTimer=null;}
 }
 async function pollQr(){
+  if(loginAdvancing)return;
   let q;
   try{q=await(await fetch('/api/qrcode')).json();}catch(e){return;}
   if(q.status==='success'){
-    closeQrDialog();
-    await loadLoginState();renderFormPlats();refreshIdentity();
+    loginAdvancing=true;
+    try{
+      await loadLoginState();renderFormPlats();refreshIdentity();
+      // 当前平台是队列队首：登录成功则出队，切换下一个或结束
+      if(loginQueue.length&&loginQueue[0]===(q.platform||pendingLoginPlat)){
+        loginQueue.shift();
+      }
+      if(loginQueue.length){
+        $('#qrLoading').style.display='inline';$('#qrLoading').textContent='登录成功，准备下一个平台…';
+        $('#qrImg').style.display='none';
+        await startNextLogin();
+      }else{
+        loginTotal=0;
+        closeQrDialog();
+      }
+    }finally{loginAdvancing=false;}
     return;
   }
   if(q.status==='timeout'){$('#qrLoading').textContent='二维码等待超时';return;}
@@ -747,11 +759,12 @@ async function pollQr(){
     $('#qrLoading').style.display='none';$('#qrImg').style.display='block';
   }
   const s=await(await fetch('/api/status')).json();
-  if(!s.running&&q.status!=='waiting')closeQrDialog();
+  if(!s.running&&q.status!=='waiting'&&!loginSwitching&&!loginAdvancing)closeQrDialog();
 }
-$('#qrClose').onclick=async()=>{closeQrDialog();await fetch('/api/stop',{method:'POST'});};
+$('#qrClose').onclick=async()=>{loginQueue=[];loginTotal=0;closeQrDialog();await fetch('/api/stop',{method:'POST'});};
 
-/* ==================== 全局轮询：进度 + 二维码兜底 + 日志 ==================== */
+/* ==================== 全局轮询：进度 + 二维码兜底 + 日志 + 登录态 ==================== */
+let pollTick=0;
 async function poll(){
   const s=await(await fetch('/api/status')).json();
   $('#submitBtn').disabled=s.running;
@@ -775,6 +788,13 @@ async function poll(){
       else if(/成功|完成|完毕|saved|success/i.test(l))c='l ok';
       return '<div class="'+c+'">'+esc(l)+'</div>';}).join('');
     $('#termBody').scrollTop=$('#termBody').scrollHeight;
+  }
+  // 登录态定时刷新（约 9 秒一次，只读缓存快照不启浏览器），有变化才重渲染圆点
+  pollTick++;
+  if(pollTick%6===0&&!loginAdvancing){
+    const prev=JSON.stringify(loginStates);
+    await loadLoginState();
+    if(JSON.stringify(loginStates)!==prev){renderFormPlats();refreshIdentity();}
   }
 }
 function renderProgress(pg){
@@ -834,6 +854,7 @@ function renderTasks(tasks){
         <span>平台：${t.platforms.map(c=>pn()[c]||c).join('、')}</span>
         <span>${t.crawl_mode==='login'?'登录抓取':'游客抓取'} · ${t.data_mode==='comment'?'评论采集':'帖子采集'}</span>
         <span>${triggerText(t)}</span>
+        ${t.schedule_type==='daily'?`<span>${t.window_mode==='rolling'?('滚动窗口：近'+t.window_hours+'小时'):'每天采当天 00:00–23:59'}</span>`:''}
         ${t.input_type==='keyword'?`<span>关键词：${esc(t.keywords||'')}</span>`:''}
         ${(t.time_start||t.time_end)?`<span>时间：${(t.time_start||'不限').replace('T',' ')} 至 ${(t.time_end||'不限').replace('T',' ')}</span>`:''}
         ${running&&t.current_platform?`<span>当前：${pn()[t.current_platform]||t.current_platform}</span>`:''}
@@ -863,54 +884,31 @@ async function taskOp(id,op){
   if(op==='export')location.href='/api/tasks/'+id+'/export';
 }
 
-/* ==================== 数据查看表格 ==================== */
-async function loadData(){
-  const d=await(await fetch('/api/data?platform='+viewPlat)).json();
-  contents=d.contents||[];comments=d.comments||[];
-  $('#cCnt').textContent=contents.length;$('#mCnt').textContent=comments.length;
-  renderData();
-}
-function renderData(){
-  const tkey=viewTabSel==='contents'?'time':'create_time';
-  let rows=(viewTabSel==='contents'?contents:comments).slice();
-  rows.sort((a,b)=>Number(b[tkey]||0)-Number(a[tkey]||0));
-  if(!rows.length){$('#data').innerHTML='<div class="empty">该平台暂无数据</div>';return;}
-  if(viewTabSel==='contents'){
-    $('#data').innerHTML='<table><thead><tr><th>序号</th><th>缩略图</th><th>标题 / 摘要</th><th>作者</th><th>互动</th><th>发布时间</th><th>原帖链接</th></tr></thead><tbody>'+
-      rows.map((r,i)=>`<tr><td class="idx">${pad(i+1)}</td>
-        <td>${img(r.image_list)?`<img class="thumb" src="${esc(img(r.image_list))}" onerror="this.style.display='none'"/>`:''}</td>
-        <td><div class="t-title">${esc(r.title)||'(无标题)'}</div><div class="t-desc">${esc(r.desc||r.content)}</div>
-          ${toArr(r.tag_list).slice(0,3).map(t=>`<span class="pill">${esc(t)}</span>`).join('')}</td>
-        <td>${esc(r.nickname)}</td>
-        <td class="num">赞 ${esc(r.liked_count)}<br>藏 ${esc(r.collected_count)}<br>评 ${esc(r.comment_count||r.comments_count)}<br>转 ${esc(r.share_count||r.shared_count)}</td>
-        <td class="num">${fmt(r.time||r.create_time)}</td>
-        <td><a class="full-link" href="${esc(r.note_url||r.aweme_url)}" target="_blank">${esc(r.note_url||r.aweme_url)}</a></td></tr>`).join('')+'</tbody></table>';
-  }else{
-    const redHead=viewPlat==='xhs'?'<th>小红书号</th>':'';
-    $('#data').innerHTML='<table><thead><tr><th>序号</th><th>评论内容</th><th>作者</th>'+redHead+'<th>赞</th><th>评论时间</th><th>原帖链接</th></tr></thead><tbody>'+
-      rows.map((r,i)=>`<tr><td class="idx">${pad(i+1)}</td><td>${esc(r.content)}</td><td>${esc(r.nickname)}</td>
-        ${viewPlat==='xhs'?`<td>${esc(r['小红书号'])||'—'}</td>`:''}
-        <td class="num">${esc(r.like_count||r.comment_like_count)}</td><td class="num">${fmt(r.create_time)}</td>
-        <td><a class="full-link" href="${esc(r.note_url)}" target="_blank">${esc(r.note_url)}</a></td></tr>`).join('')+'</tbody></table>';
-  }
-}
-$('#viewTabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{
-  viewTabSel=b.dataset.t;
-  $('#viewTabs').querySelectorAll('button').forEach(x=>x.classList.toggle('on',x===b));
-  renderData();
-});
-$('#refreshBtn').onclick=loadData;
-$('#exportBtn').onclick=()=>location.href='/api/export?platform='+viewPlat;
 $('#collapseHead').onclick=()=>$('#logCollapse').classList.toggle('open');
+
+/* ==================== 浏览器窗口可见开关 ==================== */
+async function loadVisibleSetting(){
+  try{
+    const d=await(await fetch('/api/settings')).json();
+    $('#visibleToggle').checked=!!d.browser_visible;
+  }catch(e){}
+}
+$('#visibleToggle').onchange=async()=>{
+  const on=$('#visibleToggle').checked;
+  try{
+    const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({browser_visible:on})});
+    if(!r.ok)throw new Error(await r.text());
+  }catch(e){alert('保存设置失败：'+e);$('#visibleToggle').checked=!on;}
+};
 
 /* ==================== 初始化 ==================== */
 (async()=>{
   await loadTaskPlats();
   await loadLoginState();
+  await loadVisibleSetting();
   renderFormPlats();
-  renderViewPlats();
   resetForm();
-  loadData();
   loadTasks();
   poll();
   setInterval(poll,1500);

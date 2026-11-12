@@ -21,8 +21,10 @@ import asyncio
 import json
 import os
 import random
+import re
 import time
 from asyncio import Task
+from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
 
 from patchright.async_api import (
@@ -189,29 +191,43 @@ class XiaoHongShuCrawler(AbstractCrawler):
         if config.CRAWLER_MAX_NOTES_COUNT < xhs_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = xhs_limit_count
         start_page = config.START_PAGE
+        # 有时间窗时按「最新」排序，让窗口内的新帖优先出现；无窗口保持综合排序。
+        # 修复：窄窗口（如仅当天）+ 综合排序时，首页全是旧帖导致 0 结果。
+        has_window = bool(getattr(config, "TIME_START", "") or getattr(config, "TIME_END", ""))
+        default_sort = SearchSortType.LATEST if has_window else SearchSortType.GENERAL
+        sort = SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else default_sort
+        # 页数上限＝配额页数；窗口模式额外 +2 页用于翻找窗口内帖子。
+        # 修复：原循环按「已翻页数」计配额，首页无窗口内帖子时直接结束，永远采不到。
+        max_pages = (config.CRAWLER_MAX_NOTES_COUNT + xhs_limit_count - 1) // xhs_limit_count
+        if has_window:
+            max_pages += 2
         for keyword in config.KEYWORDS.split(","):
+            keyword = keyword.strip()
+            if not keyword:
+                continue
             source_keyword_var.set(keyword)
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
             page = 1
+            saved_count = 0
             search_id = get_search_id()
-            while (page - start_page + 1) * xhs_limit_count <= config.CRAWLER_MAX_NOTES_COUNT:
+            while page <= max_pages and saved_count < config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Skip page {page}")
                     page += 1
                     continue
 
                 try:
-                    utils.logger.info(f"[XiaoHongShuCrawler.search] search Xiaohongshu keyword: {keyword}, page: {page}")
+                    utils.logger.info(f"[XiaoHongShuCrawler.search] search Xiaohongshu keyword: {keyword}, page: {page}, sort: {sort.value}")
                     note_ids: List[str] = []
                     xsec_tokens: List[str] = []
                     notes_res = await self.xhs_client.get_note_by_keyword(
                         keyword=keyword,
                         search_id=search_id,
                         page=page,
-                        sort=(SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL),
+                        sort=sort,
                     )
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes response: {notes_res}")
-                    if not notes_res or not notes_res.get("has_more", False):
+                    if not notes_res or not notes_res.get("items"):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
                         break
                     semaphore = asyncio.Semaphore(config.MAX_CONCURRENCY_NUM)
@@ -237,6 +253,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             await self.download_media(note_detail)
                             note_ids.append(note_detail.get("note_id"))
                             xsec_tokens.append(note_detail.get("xsec_token"))
+                            saved_count += 1
                     page += 1
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Note details: {note_details}")
                     await self.batch_get_note_comments(note_ids, xsec_tokens)
@@ -244,6 +261,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     # 拟人化等待（真人鼠标动作 + 长尾停顿 + 会话休息）
                     await self.xhs_client._random_sleep()
                     utils.logger.info(f"[XiaoHongShuCrawler.search] 页面 {page-1} 后拟人化等待完成")
+                    # 末页（has_more=False）的帖子也要处理完再退出，不能整页丢弃
+                    if not notes_res.get("has_more", False):
+                        utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
+                        break
                 except DataFetchError as ex:
                     utils.logger.error(f"[XiaoHongShuCrawler.search] Get note detail error: {ex}")
                     break

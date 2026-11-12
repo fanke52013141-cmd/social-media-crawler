@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -102,31 +104,68 @@ async def test_merge_rejects_corrupt_input(tmp_path):
         await merge_audio_video(video, bad_audio, merged)
 
 
+def _pid_alive(pid: int) -> bool:
+    """跨平台判断进程是否仍存活（Windows 不能用 os.kill(pid, 0)，那会真的终止进程）。"""
+    if sys.platform == "win32":
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True
+        ).stdout
+        return str(pid) in out
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
 @pytest.mark.asyncio
 async def test_merge_kills_subprocess_when_cancelled(tmp_path, monkeypatch):
-    """任务被取消（Ctrl-C / abort）时不能留下孤儿 ffmpeg 进程"""
+    """任务被取消（Ctrl-C / abort）时不能留下孤儿 ffmpeg 进程。
+
+    跨平台实现：把 merge 实际拉起的子进程替换为「Python 解释器 + 睡眠脚本」，
+    脚本先把自己的 PID 写入文件再长睡；取消后按 PID 校验进程确实被回收。
+    （旧实现用 sh 脚本 + pgrep，仅 POSIX 可用，Windows 必挂。）
+    """
     import media_downloader.ffmpeg as ffmpeg_module
 
-    # 必须用 exec：否则 sh 会另起一个 sleep 子进程，它继承着 stderr 管道，
-    # 即便 kill 掉 sh，管道清理仍会阻塞到 sleep 自然结束
-    fake_ffmpeg = tmp_path / "fake_ffmpeg.sh"
-    fake_ffmpeg.write_text("#!/bin/sh\nexec sleep 60\n")
-    fake_ffmpeg.chmod(0o755)
-    monkeypatch.setattr(ffmpeg_module, "ffmpeg_path", lambda: str(fake_ffmpeg))
+    pid_file = tmp_path / "fake_ffmpeg.pid"
+    sleeper = tmp_path / "fake_ffmpeg_sleeper.py"
+    sleeper.write_text(
+        "import os, time\n"
+        f"open(r'{pid_file}', 'w').write(str(os.getpid()))\n"
+        "time.sleep(60)\n",
+        encoding="utf-8",
+    )
+
+    real_create = asyncio.create_subprocess_exec
+
+    async def fake_create(executable, *args, **kwargs):
+        # 无论模块传什么 ffmpeg 参数，实际运行睡眠脚本（参数被脚本忽略）
+        return await real_create(sys.executable, str(sleeper), **kwargs)
+
+    monkeypatch.setattr(ffmpeg_module, "ffmpeg_path", lambda: sys.executable)
+    monkeypatch.setattr(ffmpeg_module.asyncio, "create_subprocess_exec", fake_create)
 
     task = asyncio.create_task(
         ffmpeg_module.merge_audio_video(
             tmp_path / "v.m4s", tmp_path / "a.m4s", tmp_path / "o.mp4", timeout=60
         )
     )
-    await asyncio.sleep(0.4)
+    for _ in range(50):
+        if pid_file.exists():
+            break
+        await asyncio.sleep(0.1)
+    assert pid_file.exists(), "假 ffmpeg 子进程未启动"
+    pid = int(pid_file.read_text().strip())
+
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await asyncio.sleep(0.4)
+    await asyncio.sleep(0.5)
 
-    probe = subprocess.run(["pgrep", "-f", str(fake_ffmpeg)], capture_output=True, text=True)
-    assert probe.returncode != 0, f"取消后子进程仍在运行: {probe.stdout.strip()}"
+    assert not _pid_alive(pid), f"取消后子进程仍在运行: {pid}"
 
 
 @pytest.mark.asyncio

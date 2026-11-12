@@ -34,6 +34,10 @@ SCHED_IMMEDIATE = "immediate"   # 立即执行（创建后马上跑）
 SCHED_ONCE = "once"             # 单次定时
 SCHED_DAILY = "daily"           # 每天重复
 
+# 每日任务的窗口模式
+WINDOW_TODAY = "today"          # 当天 00:00:00–23:59:59，随日期自动滚动（默认）
+WINDOW_ROLLING = "rolling"      # 执行时刻往前推 window_hours（近 N 小时滚动）
+
 VALID = {
     "data_mode": (DATA_CONTENT, DATA_COMMENT),
     "input_type": (INPUT_KEYWORD, INPUT_DETAIL),
@@ -70,17 +74,38 @@ def _new_id() -> str:
 
 
 def compute_window(task: Dict[str, Any], run_dt: datetime) -> Dict[str, Any]:
-    """执行时刻与窗口时长解耦：按实际执行时刻回推 window_hours 得到本轮发布时间窗口。
+    """计算本轮执行的发布时间窗口。
 
-    返回 win_start/win_end（ISO 字符串）与 deadline_ts（窗口终点时间戳）。
+    daily：每次触发时现场重算——today 模式取执行日当天 00:00:00–23:59:59（随日期自动滚动），
+           rolling 模式按执行时刻回推 window_hours；
+    once/immediate：用创建时固定的绝对窗口，空串表示不限时间。
+
+    deadline_ts 是编排器的「到点收尾」截止时间：today 模式取当天终点；rolling 模式不设截止
+    （窗口终点就是执行时刻本身，若当作截止会导致一触发就收尾、一个平台都不采）；
+    绝对窗口取窗口终点（无终点则不设截止）。
     """
-    hours = int(task.get("window_hours", 24))
-    win_start_dt = run_dt - timedelta(hours=hours)
-    return {
-        "win_start": win_start_dt.strftime(ISO_FMT),
-        "win_end": run_dt.strftime(ISO_FMT),
-        "deadline_ts": int(time.mktime(run_dt.timetuple())),
-    }
+    sched = task.get("schedule_type", SCHED_IMMEDIATE)
+    if sched == SCHED_DAILY:
+        if task.get("window_mode", WINDOW_TODAY) == WINDOW_TODAY:
+            day_start = datetime.combine(run_dt.date(), datetime.min.time())
+            day_end = datetime.combine(run_dt.date(), datetime.max.time().replace(microsecond=0))
+            return {
+                "win_start": day_start.strftime(ISO_FMT),
+                "win_end": day_end.strftime(ISO_FMT),
+                "deadline_ts": int(time.mktime(day_end.timetuple())),
+            }
+        hours = int(task.get("window_hours", 24))
+        win_start_dt = run_dt - timedelta(hours=hours)
+        return {
+            "win_start": win_start_dt.strftime(ISO_FMT),
+            "win_end": run_dt.strftime(ISO_FMT),
+            "deadline_ts": None,
+        }
+    # once / immediate：创建时固定的绝对窗口
+    ts = str(task.get("time_start") or "").strip()
+    te = str(task.get("time_end") or "").strip()
+    from tools import time_util
+    return {"win_start": ts, "win_end": te, "deadline_ts": time_util.iso_to_ts(te)}
 
 
 def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,8 +157,17 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     if window_hours <= 0:
         raise ValueError("时间窗时长必须大于 0")
 
+    # 每日任务窗口模式：默认当天（随日期自动滚动），可选近 N 小时滚动
+    window_mode = payload.get("window_mode", WINDOW_TODAY)
+    if window_mode not in (WINDOW_TODAY, WINDOW_ROLLING):
+        raise ValueError(f"参数 window_mode 非法：{window_mode}")
+
     # 关键词/链接校验
-    keywords = (payload.get("keywords") or "").strip()
+    # 关键词归一化：全角逗号/分号/空白统一为英文逗号分隔，与平台逐词搜索、
+    # 导出按 source_keyword 过滤的口径保持一致（修复整串搜索导致 0 结果的问题）
+    keywords = ",".join(
+        p.strip() for p in re.split(r"[,，;；\s]+", (payload.get("keywords") or "")) if p.strip()
+    )
     note_urls_in = payload.get("note_urls")
     if input_type == INPUT_KEYWORD:
         if not keywords:
@@ -151,7 +185,7 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
     get_red_id = bool(payload.get("get_red_id", True)) and "xhs" in platforms \
         and data_mode == DATA_CONTENT
 
-    # 计算展示窗口；真正执行时调度器按实际时刻重算
+    # 计算展示窗口；daily 真正执行时按触发时刻现场重算（当天/滚动），once/immediate 创建时固定
     now0 = datetime.now()
     if schedule_type == SCHED_DAILY:
         run_today = datetime.combine(now0.date(), datetime.strptime(run_time, "%H:%M").time())
@@ -163,18 +197,17 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         start_date = ""
         next_run = _parse_iso(run_time)
     else:
-        # immediate：窗口以当前时刻回推
         start_date = ""
         next_run = now0
-    # 立即执行可由前端显式指定发布时间范围；否则按 window_hours 相对执行时刻回推
-    ts_in = str(payload.get("time_start") or "").strip()
-    te_in = str(payload.get("time_end") or "").strip()
-    if ts_in or te_in:
-        win = {"win_start": ts_in, "win_end": te_in,
-               "deadline_ts": int(time.mktime(next_run.timetuple()))
-               if hasattr(next_run, "timetuple") else int(time.time())}
+    if schedule_type == SCHED_DAILY:
+        # 初始窗口仅作首轮展示：today 取今天 00:00–23:59，rolling 按生效执行时刻回推
+        win = compute_window({"schedule_type": SCHED_DAILY, "window_mode": window_mode,
+                              "window_hours": window_hours}, next_run)
     else:
-        win = compute_window({"window_hours": window_hours}, next_run)
+        # once/immediate：创建时固定绝对日期区间；未选日期即不限时间（真正的「全部」）
+        win = {"win_start": str(payload.get("time_start") or "").strip(),
+               "win_end": str(payload.get("time_end") or "").strip(),
+               "deadline_ts": None}
 
     task = {
         "id": _new_id(),
@@ -190,6 +223,7 @@ def create_task(payload: Dict[str, Any]) -> Dict[str, Any]:
         "start_date": start_date,
         "run_time": run_time,
         "window_hours": window_hours,
+        "window_mode": window_mode,
         "time_start": win["win_start"],
         "time_end": win["win_end"],
         "repeat_end": (payload.get("repeat_end") or "").strip(),

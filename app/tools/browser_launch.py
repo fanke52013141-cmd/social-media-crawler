@@ -3,7 +3,10 @@
 # 背景：chrome-headless-shell 会被小红书、抖音等平台识别为自动化而触发风控重定向，
 # 即使带着有效登录 cookie 也无法正常进入。重点平台改用「完整 Chrome + 离屏窗口」：
 # 窗口移到屏幕外，用户视觉上看不到，但浏览器是完整 Chrome，可规避无头检测。
-OFFSCREEN_PLATFORMS = ("xhs", "dy", "wb")
+# 工作台「显示浏览器窗口」开关打开时，窗口正常显示在屏幕上（便于用户观察/排查）。
+from tools import settings
+
+OFFSCREEN_PLATFORMS = ("xhs", "dy", "wb", "toutiao", "ks", "bili", "tieba", "zhihu")
 # 离屏窗口 + 反自动化启动参数（三平台统一入口，只改这里即全部生效）。
 # 这些参数在浏览器进程层抹掉自动化痕迹，与 stealth.min.js（页面层）形成双保险。
 _OFFSCREEN_ARGS = [
@@ -25,7 +28,12 @@ def effective_headless(platform: str, configured_headless: bool) -> bool:
 
 
 def offscreen_args(platform: str) -> list:
-    """重点平台返回离屏窗口参数，其他平台返回空列表。"""
+    """重点平台返回离屏窗口参数，其他平台返回空列表。
+
+    「显示浏览器窗口」打开时所有平台都返回空列表——窗口留在屏幕内可见。
+    """
+    if settings.browser_visible():
+        return []
     if platform in OFFSCREEN_PLATFORMS:
         return list(_OFFSCREEN_ARGS)
     return []
@@ -33,7 +41,7 @@ def offscreen_args(platform: str) -> list:
 
 # Patchright 隐身驱动的平台：用系统真实 Edge，而非自带 Chromium。
 # 实测驱动真实浏览器对规避自动化检测的作用，甚至高于 CDP 补丁本身。
-PATCHRIGHT_PLATFORMS = ("xhs", "dy", "wb")
+PATCHRIGHT_PLATFORMS = ("xhs", "dy", "wb", "toutiao", "ks", "bili", "tieba", "zhihu")
 
 
 def browser_channel(platform: str):

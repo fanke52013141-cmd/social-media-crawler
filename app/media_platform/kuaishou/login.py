@@ -19,7 +19,6 @@
 
 
 import asyncio
-import functools
 import sys
 from typing import Optional
 
@@ -29,7 +28,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 
 import config
 from base.base_crawler import AbstractLogin
-from tools import utils
+from tools import utils, qr_state
 
 
 class KuaishouLogin(AbstractLogin):
@@ -77,10 +76,26 @@ class KuaishouLogin(AbstractLogin):
         utils.logger.info("[KuaishouLogin.login_by_qrcode] Begin login kuaishou by qrcode ...")
 
         # click login button
-        login_button_ele = self.context_page.locator(
-            "xpath=//p[text()='登录']"
-        )
-        await login_button_ele.click()
+        # 2026-11 实测：?isHome=1 首页入口为右上角 p.user-default「登录」，
+        # 视频页入口为左侧「立即登录」按钮；静音提示等临时浮层可能拦截点击，
+        # 因此双选择器 + 短超时重试，最后兜底 JS 点击（仅用于打开登录弹窗）。
+        clicked = False
+        for _ in range(3):
+            for sel in ("p.user-default", "text=立即登录"):
+                loc = self.context_page.locator(sel).first
+                if await loc.count() == 0:
+                    continue
+                try:
+                    await loc.click(timeout=5000)
+                    clicked = True
+                    break
+                except Exception:
+                    await asyncio.sleep(2)  # 等临时浮层消失再试
+            if clicked:
+                break
+        if not clicked:
+            await self.context_page.evaluate(
+                "() => { const el = document.querySelector('p.user-default'); if (el) el.click(); }")
 
         # find login qrcode
         qrcode_img_selector = "//div[@class='qrcode-img']//img"
@@ -93,17 +108,17 @@ class KuaishouLogin(AbstractLogin):
             sys.exit()
 
 
-        # show login qrcode
-        partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
-
-        utils.logger.info(f"[KuaishouLogin.login_by_qrcode] waiting for scan code login, remaining time is 20s")
+        # 内嵌展示二维码：写入状态供工作台浮层轮询，不弹任何系统窗口
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_WAITING, base64_qrcode_img)
+        utils.logger.info("[KuaishouLogin.login_by_qrcode] 请使用「快手 App」扫码，等待中...")
         try:
             await self.check_login_state()
         except RetryError:
+            qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_TIMEOUT)
             utils.logger.info("[KuaishouLogin.login_by_qrcode] Login kuaishou failed by qrcode login method ...")
             sys.exit()
 
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
         wait_redirect_seconds = 5
         utils.logger.info(f"[KuaishouLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
         await asyncio.sleep(wait_redirect_seconds)

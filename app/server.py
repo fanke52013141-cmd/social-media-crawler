@@ -4,11 +4,10 @@ import json, glob, os, re, time, subprocess, threading
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-import pandas as pd
 
 from tools import login_state
-from tools.async_file_writer import data_dir_of
 from tools import task_store, orchestrator, task_exporter
+from tools import settings
 from tools.scheduler import scheduler
 
 ROOT = Path(__file__).resolve().parent
@@ -37,42 +36,6 @@ def _start_scheduler():
 def _stop_scheduler():
     scheduler.shutdown()
 
-CONTENT_CN = {
-    "note_id": "笔记ID", "type": "类型", "title": "标题", "desc": "正文",
-    "video_url": "视频链接", "time": "发布时间戳", "last_update_time": "更新时间戳",
-    "creator_hash": "作者哈希", "nickname": "作者", "liked_count": "点赞数",
-    "collected_count": "收藏数", "comment_count": "评论数", "share_count": "分享数",
-    "image_list": "图片列表", "tag_list": "标签", "last_modify_ts": "数据时间戳",
-    "note_url": "原帖链接", "source_keyword": "来源关键词", "xsec_token": "访问令牌",
-    "read_count": "阅读量",
-}
-COMMENT_CN = {
-    "comment_id": "评论ID", "create_time": "评论时间戳", "note_id": "笔记ID",
-    "content": "评论内容", "creator_hash": "作者哈希", "nickname": "作者",
-    "sub_comment_count": "子评论数", "pictures": "图片", "parent_comment_id": "父评论ID",
-    "last_modify_ts": "数据时间戳", "like_count": "点赞数", "note_url": "原帖链接",
-    "user_verified": "认证标识",
-}
-
-
-def latest_rows(plat: str, kind: str):
-    files = glob.glob(str(DATA / data_dir_of(plat) / "jsonl" / f"*_{kind}_*.jsonl"))
-    if not files:
-        return []
-    f = max(files, key=os.path.getmtime)
-    rows = []
-    with open(f, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(json.loads(line))
-            except Exception:
-                pass
-    return rows
-
-
 def normalize_keywords(raw: str) -> str:
     parts = [p.strip() for p in re.split(r"[,，;；\n\r]+", raw or "") if p.strip()]
     return ",".join(parts)
@@ -82,30 +45,6 @@ def normalize_note_urls(raw: str) -> str:
     """归一化帖子链接：按逗号/分号/空白(含换行)拆分，只保留 http 链接，用英文逗号拼接。"""
     parts = [p.strip() for p in re.split(r"[,，;；\s]+", raw or "") if p.strip().startswith("http")]
     return ",".join(parts)
-
-
-def note_url_map(contents):
-    out = {}
-    for r in contents:
-        nid, u = r.get("note_id"), r.get("note_url")
-        if nid and u:
-            out[nid] = u
-    return out
-
-
-def attach_note_url(comments, mapping, platform="xhs"):
-    for r in comments:
-        nid = r.get("note_id")
-        if nid and mapping.get(nid):
-            r["note_url"] = mapping[nid]
-        elif r.get("note_url"):
-            # 评论自带的链接（如头条在采集时已写入），保留
-            pass
-        elif nid and platform == "xhs":
-            r["note_url"] = f"https://www.xiaohongshu.com/explore/{nid}"
-        else:
-            r["note_url"] = ""
-    return comments
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -118,6 +57,20 @@ def index():
 @app.get("/api/platforms")
 def platforms():
     return {"platforms": [{"code": c, "name": n} for c, n in PLATFORMS]}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return settings.load()
+
+
+@app.post("/api/settings")
+async def update_settings(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return settings.save(body or {})
 
 
 @app.get("/api/login-state")
@@ -312,94 +265,13 @@ def status():
             "task_name": task["name"] if task else ""}
 
 
-@app.get("/api/data")
-def data(platform: str):
-    if platform not in CODES:
-        raise HTTPException(400, "bad platform")
-    c = latest_rows(platform, "contents")
-    m = latest_rows(platform, "comments")
-    attach_note_url(m, note_url_map(c), platform)
-    return {"contents": c, "comments": m}
-
-
-def _fmt_ts(v):
-    try:
-        n = float(v)
-        if n > 1e12:
-            n /= 1000
-        return time.strftime("%Y-%m-%d %H:%M", time.localtime(n))
-    except Exception:
-        return ""
-
-
-def _link_column(ws, header_name):
-    headers = [cell.value for cell in ws[1]]
-    if header_name not in headers:
-        return
-    col = headers.index(header_name) + 1
-    for r in range(2, ws.max_row + 1):
-        cell = ws.cell(row=r, column=col)
-        if cell.value:
-            cell.hyperlink = cell.value
-            cell.style = "Hyperlink"
-
-
-@app.get("/api/export")
-def export(platform: str):
-    if platform not in CODES:
-        raise HTTPException(400, "bad platform")
-    if platform not in task_exporter.PLATFORM_META:
-        raise HTTPException(400, "该平台暂不支持导出")
-    meta = task_exporter.PLATFORM_META[platform]
-
-    # 复用定时导出器的读取/标准化（已处理平台字段差异、目录名、去重、毫秒归一化）
-    c_rows = task_exporter._read_all_rows(platform, "content")
-    m_rows = task_exporter._read_all_rows(platform, "comment")
-    c_std = task_exporter._to_standard(c_rows, meta["content"])
-    m_std = task_exporter._to_standard(m_rows, meta["comment"])
-
-    # 评论关联原帖链接
-    url_map = {str(r.get("id")): r.get("url") for r in c_std if r.get("id") and r.get("url")}
-    for r in m_std:
-        ref = str(r.get("ref_id", ""))
-        if ref in url_map:
-            r["url"] = url_map[ref]
-
-    c_df = pd.DataFrame(c_std)
-    if not c_df.empty:
-        c_df["pub_time"] = c_df["pub_ts"].apply(task_exporter._fmt_ts)
-        c_df = c_df.sort_values("pub_ts", ascending=False).drop(columns=["pub_ts"])
-        c_df = c_df.rename(columns=task_exporter.CONTENT_CN)
-        ordered = [c for c in task_exporter.CONTENT_CN.values() if c in c_df.columns]
-        c_df = c_df[ordered + [c for c in c_df.columns if c not in ordered]]
-    m_df = pd.DataFrame(m_std)
-    if not m_df.empty:
-        m_df["comment_time"] = m_df["comment_ts"].apply(task_exporter._fmt_ts)
-        m_df = m_df.sort_values("comment_ts", ascending=False).drop(columns=["comment_ts"])
-        m_df = m_df.rename(columns=task_exporter.COMMENT_CN)
-        ordered = [c for c in task_exporter.COMMENT_CN.values() if c in m_df.columns]
-        m_df = m_df[ordered + [c for c in m_df.columns if c not in ordered]]
-
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    seq = 1
-    while True:
-        xlsx = DATA / f"{PLAT_NAME[platform]}_{ts}_内容评论_{seq:02d}.xlsx"
-        if not xlsx.exists():
-            break
-        seq += 1
-
-    with pd.ExcelWriter(xlsx, engine="openpyxl") as w:
-        c_df.to_excel(w, sheet_name="内容", index=False)
-        m_df.to_excel(w, sheet_name="评论", index=False)
-        _link_column(w.book["内容"], "原帖链接")
-        _link_column(w.book["评论"], "原帖链接")
-    return FileResponse(xlsx, filename=xlsx.name)
-
-
 # ==================== 定时任务 API ====================
 @app.get("/api/tasks")
 def get_tasks():
-    return {"tasks": task_store.list_tasks(), "active": scheduler.active_task_id}
+    # 最新创建的任务置顶（created_at 为 ISO 本地时间串，字典序即时间序）
+    tasks = sorted(task_store.list_tasks(),
+                   key=lambda t: t.get("created_at", ""), reverse=True)
+    return {"tasks": tasks, "active": scheduler.active_task_id}
 
 
 @app.post("/api/tasks")
@@ -475,10 +347,9 @@ def _manual_worker(t: dict):
     try:
         task_store.update_task(tid, {"status": task_store.STATUS_RUNNING,
                                      "current_platform": "", "message": "手动执行中"})
-        # 手动立即运行：以当前时刻为执行点，按窗口时长动态回推，与定时路径同一套窗口逻辑
-        win = task_store.compute_window(t, datetime.now())
+        # 手动执行窗口：每日任务现场重算（当天/近N小时滚动），单次/立即用创建时固定的绝对窗口。
         # 手动执行不设"到点 deadline"：所有平台跑完即止；窗口终点仅用于发布时间过滤。
-        # 若传当前时刻作为 deadline，登录体检耗时后会被判定已过期，导致一个平台都不采集。
+        win = task_store.compute_window(t, datetime.now())
         exec_out = scheduler.execute_once(t, win["win_start"], win["win_end"], None)
         if exec_out["blocked"]:
             final_status = task_store.STATUS_FAILED
@@ -511,11 +382,19 @@ def _manual_worker(t: dict):
             msg = "登录态失效，本次未采集"
         else:
             msg = "手动执行完成"
+        skipped = exec_out.get("skipped") or []
+        if skipped and not exec_out["blocked"]:
+            from tools import login_state
+            snames = [login_state.PLATFORM_LOGIN_INFO[p]["name"] for p in skipped]
+            msg += f"（{'、'.join(snames)}登录态失效已跳过）"
         task_store.update_task(tid, {
             "status": final_status,
             "run_history": history,
             "export_files": export_files,
             "current_platform": "",
+            # 写回本轮真实窗口：卡片显示与「导出」按钮跟上最新一轮（每日任务随日期滚动）
+            "time_start": win["win_start"],
+            "time_end": win["win_end"],
             "message": msg,
         })
     except Exception as e:

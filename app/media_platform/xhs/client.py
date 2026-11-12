@@ -34,7 +34,7 @@ from tenacity import (
     wait_fixed,
     wait_random_exponential,
 )
-from tools.httpx_util import make_async_client
+from tools.tls_client import make_tls_client as make_async_client
 
 import config
 from base.base_crawler import AbstractApiClient
@@ -52,12 +52,23 @@ from .exception import (
     IPBlockError,
     NoteNotFoundError,
     PlatformAccessError,
-    RateLimitError,
+    RiskControlError,
 )
 from .field import SearchNoteType, SearchSortType
 from .help import get_search_id
 from .extractor import XiaoHongShuExtractor
 from .playwright_sign import sign_with_xhshow
+
+
+def _request_stop(retry_state):
+    """request 的重试停止条件：默认最多 4 次尝试。
+
+    外层自带重试的调用路径（如 get_note_by_id_from_html，外层 3 次）传
+    _single_attempt=True，内层只尝试 1 次，避免内外重试相乘（3×4=12 次传输）。
+    """
+    if retry_state.kwargs.get("_single_attempt"):
+        return True
+    return retry_state.attempt_number >= 4
 
 
 class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
@@ -149,10 +160,10 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         return self.headers
 
     @retry(
-        stop=stop_after_attempt(4),
+        stop=_request_stop,
         wait=wait_random_exponential(multiplier=1.5, max=30),
         retry=retry_if_not_exception_type(
-            (NoteNotFoundError, IPBlockError, PlatformAccessError, CaptchaError)
+            (NoteNotFoundError, IPBlockError, PlatformAccessError, CaptchaError, RiskControlError)
         ),
         reraise=True,
     )
@@ -170,6 +181,10 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         # Check if proxy is expired before each request
         await self._refresh_proxy_if_expired()
 
+        # 复制一份再剔除内部控制参数：tenacity 的 retry_state.kwargs 引用原始 dict，
+        # 直接在原 dict 上 pop 会让后续尝试读不到 _single_attempt 标志。
+        kwargs = dict(kwargs)
+        kwargs.pop("_single_attempt", None)
         # return response.text
         return_response = kwargs.pop("return_response", False)
         captcha_attempts = 0
@@ -183,14 +198,12 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 )
 
             if response.status_code == 429:
-                # 临时限流：优先遵循 Retry-After，否则随机退避，再交由 tenacity 指数退避重试
-                retry_after = response.headers.get("Retry-After")
-                wait_s = float(retry_after) if retry_after and retry_after.isdigit() else random.uniform(5, 12)
-                utils.logger.warning(f"HTTP 429 rate limited, backoff {wait_s:.1f}s then retry")
+                # 熔断：平台已限流，立即终止本轮，交编排器阶梯冷却。
+                # 风控窗口内秒级硬重试会把限制升级为警告/封禁（账号已被警告，尤其要收手）。
+                utils.logger.warning("HTTP 429 rate limited, abort this run for cooldown")
                 risk_signals.record(config.PLATFORM, risk_signals.KIND_RATE_LIMIT,
-                                    f"HTTP 429 backoff {wait_s:.1f}s")
-                await asyncio.sleep(wait_s)
-                raise RateLimitError(f"XHS rate limited with HTTP 429, backoff {wait_s:.1f}s")
+                                    "HTTP 429 circuit breaker")
+                raise RiskControlError("XHS rate limited (HTTP 429), abort for cooldown")
 
             if response.status_code == 471 or response.status_code == 461:
                 verify_type = response.headers["Verifytype"]
@@ -226,14 +239,12 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             if response_code == str(self.IP_ERROR_CODE):
                 raise IPBlockError(self.IP_ERROR_STR)
             if response_code == str(self.SECURITY_LIMIT_CODE):
-                # 账号安全限制多为临时风控：随机退避后重试，避免在风控期继续高频请求
-                wait_s = random.uniform(8, 15)
-                utils.logger.warning(f"account security limit, backoff {wait_s:.1f}s then retry")
+                # 熔断：账号安全限制是警告前兆，立即终止本轮并阶梯冷却，不再退避重试。
+                utils.logger.warning("account security limit (300011), abort this run for cooldown")
                 risk_signals.record(config.PLATFORM, risk_signals.KIND_SECURITY,
-                                    f"code {self.SECURITY_LIMIT_CODE} backoff {wait_s:.1f}s")
-                await asyncio.sleep(wait_s)
-                raise RateLimitError(
-                    f"XHS account security restriction, code: {self.SECURITY_LIMIT_CODE}, backoff {wait_s:.1f}s"
+                                    f"code {self.SECURITY_LIMIT_CODE} circuit breaker")
+                raise RiskControlError(
+                    f"XHS account security restriction, code: {self.SECURITY_LIMIT_CODE}, abort for cooldown"
                 )
 
             if return_response:
@@ -801,7 +812,8 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             del copy_headers["Cookie"]
 
         html = await self.request(
-            method="GET", url=url, return_response=True, headers=copy_headers
+            method="GET", url=url, return_response=True, headers=copy_headers,
+            _single_attempt=True,
         )
 
         return self._extractor.extract_note_detail_from_html(note_id, html)

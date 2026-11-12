@@ -26,15 +26,19 @@ KIND_SECURITY = "security_limit"
 KIND_LOGIN_WALL = "login_wall"
 KIND_WARNING = "warning"
 
-# 触发冷却的高危信号
-HIGH_RISK_KINDS = (KIND_CAPTCHA, KIND_SECURITY)
+# 触发冷却的高危信号（限流也视为平台已介入，账号被警告背景下宁严勿松）
+HIGH_RISK_KINDS = (KIND_CAPTCHA, KIND_SECURITY, KIND_RATE_LIMIT)
 
-# 默认冷却时长区间（秒）：30–60 分钟
-COOLDOWN_MIN = 1800
-COOLDOWN_MAX = 3600
+# 阶梯冷却时长（秒）：24 小时内首次 30 分钟、再犯 2 小时、三犯及以上 24 小时。
+# 参考社区保守型风控闸门（CreatorHub 等）：风控窗口内绝不硬撞，冷却随再犯升级。
+COOLDOWN_TIERS = (1800, 7200, 86400)
 
-# 单轮高危信号达到该次数即触发冷却
-HIGH_RISK_THRESHOLD = 2
+# 兼容旧引用：默认冷却区间取首档
+COOLDOWN_MIN = COOLDOWN_TIERS[0]
+COOLDOWN_MAX = COOLDOWN_TIERS[0]
+
+# 单轮高危信号达到该次数即触发冷却（首次信号即收手）
+HIGH_RISK_THRESHOLD = 1
 
 
 def record(platform: str, kind: str, detail: str = "",
@@ -116,20 +120,12 @@ def _write_cooldown(data: Dict[str, Dict]) -> None:
 
 
 def in_cooldown(platform: str) -> bool:
-    """平台当前是否处于冷却中。过期则视为已解除并清理。"""
+    """平台当前是否处于冷却中。过期视为已解除（保留再犯历史用于阶梯升级）。"""
     data = _read_cooldown()
     item = data.get(platform)
     if not item:
         return False
-    if time.time() >= float(item.get("until_ts", 0)):
-        # 已过期，惰性清理
-        try:
-            data.pop(platform, None)
-            _write_cooldown(data)
-        except Exception:
-            pass
-        return False
-    return True
+    return time.time() < float(item.get("until_ts", 0))
 
 
 def cooldown_remaining(platform: str) -> int:
@@ -155,6 +151,29 @@ def set_cooldown(platform: str, seconds: int, reason: str = "") -> None:
         "updated_at": round(time.time(), 1),
     }
     _write_cooldown(data)
+
+
+def escalating_cooldown(platform: str, reason: str = "") -> int:
+    """阶梯冷却：24 小时内按再犯次数升级（30 分钟 → 2 小时 → 24 小时）。
+
+    返回本次冷却秒数。再犯历史随冷却状态持久化，过期不清除历史，
+    保证「冷却结束又犯」不会重置回最短档。
+    """
+    data = _read_cooldown()
+    item = data.get(platform, {})
+    now = time.time()
+    history = [t for t in item.get("history", []) if now - float(t) < 86400]
+    tier = min(len(history), len(COOLDOWN_TIERS) - 1)
+    seconds = COOLDOWN_TIERS[tier]
+    history.append(round(now, 1))
+    data[platform] = {
+        "until_ts": round(now + seconds, 1),
+        "reason": str(reason)[:200],
+        "updated_at": round(now, 1),
+        "history": history,
+    }
+    _write_cooldown(data)
+    return seconds
 
 
 def clear_cooldown(platform: str) -> None:

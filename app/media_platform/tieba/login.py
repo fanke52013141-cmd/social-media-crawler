@@ -19,7 +19,6 @@
 
 
 import asyncio
-import functools
 import sys
 from typing import Optional
 
@@ -29,7 +28,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 
 import config
 from base.base_crawler import AbstractLogin
-from tools import utils
+from tools import utils, qr_state
 
 
 class BaiduTieBaLogin(AbstractLogin):
@@ -82,6 +81,18 @@ class BaiduTieBaLogin(AbstractLogin):
     async def login_by_qrcode(self):
         """login baidutieba website and keep webdriver login state"""
         utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] Begin login baidutieba by qrcode ...")
+        # 2026-11 实测：新版首页右侧登录卡片显示占位二维码，需先点「点击登录」
+        # (button.view-qrcode-btn) 拉起百度 passport 弹窗，真实二维码
+        # (img.tang-pass-qrcode-img) 才会加载；旧入口 li.u_login 保留作兜底。
+        for sel in ("button.view-qrcode-btn", "xpath=//li[@class='u_login']"):
+            loc = self.context_page.locator(sel).first
+            if await loc.count() == 0:
+                continue
+            try:
+                await loc.click(timeout=8000)
+                break
+            except Exception:
+                continue
         qrcode_img_selector = "xpath=//img[@class='tang-pass-qrcode-img']"
         # find login qrcode
         base64_qrcode_img = await utils.find_login_qrcode(
@@ -90,32 +101,19 @@ class BaiduTieBaLogin(AbstractLogin):
         )
         if not base64_qrcode_img:
             utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-            # if this website does not automatically popup login dialog box, we will manual click login button
-            await asyncio.sleep(0.5)
-            login_button_ele = self.context_page.locator("xpath=//li[@class='u_login']")
-            await login_button_ele.click()
-            base64_qrcode_img = await utils.find_login_qrcode(
-                self.context_page,
-                selector=qrcode_img_selector
-            )
-            if not base64_qrcode_img:
-                utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] login failed , have not found qrcode please check ....")
-                sys.exit()
+            sys.exit()
 
-        # show login qrcode
-        # fix issue #12
-        # we need to use partial function to call show_qrcode function and run in executor
-        # then current asyncio event loop will not be blocked
-        partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
-
-        utils.logger.info(f"[BaiduTieBaLogin.login_by_qrcode] waiting for scan code login, remaining time is 120s")
+        # 内嵌展示二维码：写入状态供工作台浮层轮询，不弹任何系统窗口
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_WAITING, base64_qrcode_img)
+        utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] 请使用「百度 App」扫码，等待中...")
         try:
             await self.check_login_state()
         except RetryError:
+            qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_TIMEOUT)
             utils.logger.info("[BaiduTieBaLogin.login_by_qrcode] Login baidutieba failed by qrcode login method ...")
             sys.exit()
 
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
         wait_redirect_seconds = 5
         utils.logger.info(f"[BaiduTieBaLogin.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")
         await asyncio.sleep(wait_redirect_seconds)

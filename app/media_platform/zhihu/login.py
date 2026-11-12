@@ -20,7 +20,6 @@
 
 # -*- coding: utf-8 -*-
 import asyncio
-import functools
 import sys
 from typing import Optional
 
@@ -30,7 +29,7 @@ from tenacity import (RetryError, retry, retry_if_result, stop_after_attempt,
 
 import config
 from base.base_crawler import AbstractLogin
-from tools import utils
+from tools import utils, qr_state
 
 
 class ZhiHuLogin(AbstractLogin):
@@ -92,21 +91,18 @@ class ZhiHuLogin(AbstractLogin):
             if not base64_qrcode_img:
                 sys.exit()
 
-        # show login qrcode
-        # fix issue #12
-        # we need to use partial function to call show_qrcode function and run in executor
-        # then current asyncio event loop will not be blocked
-        partial_show_qrcode = functools.partial(utils.show_qrcode, base64_qrcode_img)
-        asyncio.get_running_loop().run_in_executor(executor=None, func=partial_show_qrcode)
-
-        utils.logger.info(f"[ZhiHu.login_by_qrcode] waiting for scan code login, remaining time is 120s")
+        # 内嵌展示二维码：写入状态供工作台浮层轮询，不弹任何系统窗口
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_WAITING, base64_qrcode_img)
+        utils.logger.info("[ZhiHu.login_by_qrcode] 请使用「知乎 App」扫码，等待中...")
         try:
             await self.check_login_state()
 
         except RetryError:
+            qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_TIMEOUT)
             utils.logger.info("[ZhiHu.login_by_qrcode] Login zhihu failed by qrcode login method ...")
             sys.exit()
 
+        qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
         wait_redirect_seconds = 5
         utils.logger.info(
             f"[ZhiHu.login_by_qrcode] Login successful then wait for {wait_redirect_seconds} seconds redirect ...")

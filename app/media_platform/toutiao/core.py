@@ -7,7 +7,7 @@ import random
 from typing import Dict, List, Optional
 from urllib.parse import quote
 
-from playwright.async_api import (
+from patchright.async_api import (
     BrowserContext,
     BrowserType,
     Page,
@@ -16,7 +16,8 @@ from playwright.async_api import (
 
 import config
 from base.base_crawler import AbstractCrawler
-from tools import qr_state, utils
+from tools import qr_state, utils, browser_launch
+from tools.login_state import mark_logged_in
 from tools.async_file_writer import AsyncFileWriter
 from var import crawler_type_var, source_keyword_var
 
@@ -67,6 +68,7 @@ class ToutiaoCrawler(AbstractCrawler):
                 if _logged:
                     # 已具备登录态，无需扫码：写 success 让前端自动关闭浮层
                     qr_state.write_qr_state(config.PLATFORM, qr_state.STATUS_SUCCESS)
+                    mark_logged_in(config.PLATFORM)
                 else:
                     login_obj = ToutiaoLogin(
                         login_type=config.LOGIN_TYPE,
@@ -76,6 +78,7 @@ class ToutiaoCrawler(AbstractCrawler):
                         cookie_str=config.COOKIES,
                     )
                     await login_obj.begin()
+                    mark_logged_in(config.PLATFORM)
 
             if getattr(config, "LOGIN_ONLY", False):
                 utils.logger.info("[Crawler.start] login-only mode, finished after login, skip crawling")
@@ -470,21 +473,14 @@ class ToutiaoCrawler(AbstractCrawler):
             profile_dir = os.path.join(
                 os.getcwd(), "browser_data", config.USER_DATA_DIR % config.PLATFORM
             )
-        # 头条号主页(/c/user/)存在无头检测：无头访问返回空页面。
-        # creator 模式改用有头渲染并把窗口移到屏幕外，既拿到数据又保持视觉静默。
-        extra_args: list = []
-        if config.CRAWLER_TYPE == "creator":
-            headless = False
-            extra_args = [
-                "--window-position=-32000,-32000",
-                "--window-size=1440,900",
-            ]
-            utils.logger.info("[ToutiaoCrawler.launch_browser] Creator mode, offscreen headful to bypass headless check")
+        # 头条存在无头检测（无头访问返回空页面/风控）。对齐 xhs/dy/wb 重点平台策略：
+        # Patchright 驱动系统真实 Edge + 离屏有头窗口，视觉静默且降低被识别风险（见 browser_launch）。
         return await chromium.launch_persistent_context(
             user_data_dir=profile_dir,
             accept_downloads=True,
-            headless=headless,
-            args=extra_args,
+            headless=browser_launch.effective_headless(config.PLATFORM, headless),
+            args=browser_launch.offscreen_args(config.PLATFORM),
+            channel=browser_launch.browser_channel(config.PLATFORM),
             proxy=playwright_proxy,
             viewport={"width": 1440, "height": 900},
             user_agent=user_agent,

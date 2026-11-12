@@ -8,7 +8,11 @@ import pytest
 from tenacity import RetryError
 
 from media_platform.xhs.client import XiaoHongShuClient
-from media_platform.xhs.exception import IPBlockError, PlatformAccessError
+from media_platform.xhs.exception import (
+    IPBlockError,
+    PlatformAccessError,
+    RiskControlError,
+)
 
 
 class FakeAsyncClient:
@@ -36,7 +40,7 @@ def make_client():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [401, 403, 429])
+@pytest.mark.parametrize("status_code", [401, 403])
 async def test_raw_response_rejects_access_http_status(monkeypatch, status_code):
     calls = 0
 
@@ -63,11 +67,38 @@ async def test_raw_response_rejects_access_http_status(monkeypatch, status_code)
 
 
 @pytest.mark.asyncio
+async def test_raw_response_429_circuit_breaks(monkeypatch):
+    """HTTP 429：平台已限流 → 立即熔断（RiskControlError，不重试），
+    交编排器阶梯冷却。风控窗口内硬重试会把限制升级为警告/封禁。"""
+    calls = 0
+
+    async def request_impl(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            429,
+            text="rate limited",
+            headers={"Retry-After": "1"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(
+        "media_platform.xhs.client.make_async_client",
+        lambda **kwargs: FakeAsyncClient(request_impl),
+    )
+
+    with pytest.raises(RiskControlError):
+        await make_client().request(
+            "GET", "https://www.xiaohongshu.com/explore/test", return_response=True
+        )
+
+    assert calls == 1  # 首次信号即收手，不做秒级硬重试
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("code", "expected_exception", "return_response"),
     [
-        (300011, PlatformAccessError, True),
-        ("300011", PlatformAccessError, False),
         (300012, IPBlockError, True),
         ("300012", IPBlockError, False),
     ],
@@ -96,6 +127,34 @@ async def test_raw_response_rejects_known_business_block(
             "GET",
             "https://www.xiaohongshu.com/explore/test",
             return_response=return_response,
+        )
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", [300011, "300011"])
+async def test_raw_response_security_limit_circuit_breaks(monkeypatch, code):
+    """账号安全限制(300011)是警告前兆 → 立即熔断（不重试），交编排器阶梯冷却。"""
+    calls = 0
+
+    async def request_impl(method, url, **kwargs):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"success": False, "code": code, "msg": "security limit"},
+            request=httpx.Request(method, url),
+        )
+
+    monkeypatch.setattr(
+        "media_platform.xhs.client.make_async_client",
+        lambda **kwargs: FakeAsyncClient(request_impl),
+    )
+
+    with pytest.raises(RiskControlError):
+        await make_client().request(
+            "GET", "https://www.xiaohongshu.com/explore/test", return_response=True
         )
 
     assert calls == 1

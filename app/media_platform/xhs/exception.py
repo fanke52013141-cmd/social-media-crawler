@@ -37,6 +37,14 @@ class RateLimitError(RequestError):
     """temporary rate limiting (HTTP 429 / security limit), safe to retry after backoff"""
 
 
+class RiskControlError(RequestError):
+    """平台风控已介入（429/300011/验证码）：立即收手，不做秒级硬重试。
+
+    账号已被警告的背景下，风控窗口内反复重试会把限制升级为封禁。
+    该异常不参与 tenacity 重试，直接终止本轮采集，由编排器施加阶梯冷却。
+    """
+
+
 class CaptchaError(RequestError):
     """human verification required (HTTP 461/471), needs headed browser or manual solve"""
 

@@ -32,7 +32,7 @@ COMMENT_ID = "998877"
 # 合法 RFC2822 时间串(weekday 与日期已对齐:2025-06-14 是周六)
 RFC2822_TIME = "Sat Jun 14 12:00:00 +0800 2025"
 
-# 禁用字段名(键)。昵称字段允许保留,但值必须脱敏。
+# 禁用字段名(键)。昵称字段允许保留,本地口径完整保留原文。
 FORBIDDEN_KEYS = {
     "user_id", "sec_uid", "short_user_id", "user_unique_id",
     "avatar", "user_avatar", "face", "sign", "profile_url", "user_link",
@@ -146,11 +146,10 @@ def test_weibo_note_masks_user_info():
     assert creator_hash != RAW_USER_ID
     assert len(creator_hash) == 16
 
-    # 3. 昵称已脱敏:不等于原文且含星号
+    # 3. 昵称完整保留（本地口径）
     nickname = captured.get("nickname")
     assert nickname, "note dict 缺少 nickname"
-    assert nickname != RAW_NICKNAME, "note 昵称未脱敏,仍为原文"
-    assert "*" in nickname, f"note 昵称未脱敏: {nickname}"
+    assert nickname == RAW_NICKNAME, "note 昵称应完整保留原文"
 
     # 4. 内容字段正确(正文存于 content,不是 desc)
     assert "hello" not in captured  # 确认没误存
@@ -186,11 +185,10 @@ def test_weibo_comment_masks_user_info():
     assert creator_hash != RAW_COMMENT_USER_ID
     assert len(creator_hash) == 16
 
-    # 3. 昵称已脱敏
+    # 3. 昵称完整保留（本地口径）
     nickname = captured.get("nickname")
     assert nickname, "comment dict 缺少 nickname"
-    assert nickname != RAW_COMMENT_NICKNAME, "comment 昵称未脱敏,仍为原文"
-    assert "*" in nickname, f"comment 昵称未脱敏: {nickname}"
+    assert nickname == RAW_COMMENT_NICKNAME, "comment 昵称应完整保留原文"
 
     # 4. 内容字段正确
     assert "说得好" in captured["content"]
@@ -244,7 +242,7 @@ def test_weibo_store_end_to_end_sqlite():
             f"WeiboNote 表仍含禁用列: {note_cols & FORBIDDEN_KEYS}"
         # 行数据层面:creator_hash 正确、昵称脱敏、正文保留
         assert row.creator_hash and row.creator_hash != str(RAW_USER_ID)
-        assert row.nickname != RAW_NICKNAME and "*" in row.nickname
+        assert row.nickname == RAW_NICKNAME
         assert row.note_id == NOTE_ID
         assert "今天天气不错" in row.content
         # 确认没有 desc 列存任何用户描述
@@ -262,7 +260,7 @@ def test_weibo_store_end_to_end_sqlite():
         assert not (comment_cols & FORBIDDEN_KEYS), \
             f"WeiboNoteComment 表仍含禁用列: {comment_cols & FORBIDDEN_KEYS}"
         assert crow.creator_hash and crow.creator_hash != str(RAW_COMMENT_USER_ID)
-        assert crow.nickname != RAW_COMMENT_NICKNAME and "*" in crow.nickname
+        assert crow.nickname == RAW_COMMENT_NICKNAME
         assert crow.comment_id == COMMENT_ID
         assert crow.note_id == NOTE_ID
         assert "说得好" in crow.content
