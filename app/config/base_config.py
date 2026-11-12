@@ -62,6 +62,15 @@ HEADLESS = True
 TIME_START = ""
 TIME_END = ""
 
+# 时间窗早停：按「最新」排序翻页时，连续 N 条窗口外帖子即结束该关键词翻页。
+# 用"连续 N 条"而非"第一条旧帖"，因小红书最新排序非严格时序，防漏采。
+# 每日采集量由此自然收敛到窗口内新发布量，无需硬上限。仅窗口+最新排序时生效。
+WINDOW_EARLY_STOP_STREAK = 5
+
+# 每日定时任务启动抖动上限（分钟）：到点后随机延后 0–N 分钟启动，
+# 消除"每天准点"机器特征。0 = 关闭抖动。仅影响每日重复任务。
+SCHED_JITTER_MAX_MIN = 90
+
 # Whether to save login status
 SAVE_LOGIN_STATE = True
 
@@ -163,26 +172,32 @@ CRAWLER_MAX_SLEEP_SEC = 6  # 兼容旧逻辑的固定间隔（已主要被下面
 SAFE_MODE = True            # 安全保守模式总开关
 HUMAN_BEHAVIOR = True       # 是否在页面上模拟真人鼠标移动、滚动、阅读停留
 
+# UI 驱动采集（小红书）：搜索/详情/评论改为真实页面操作+拦截页面自身数据响应，
+# 每次取数都伴随真实页面加载、阅读停留、滚动与点击，行为链路与真人一致。
+# 全程无头运行不占屏幕；数据结构与 API 完全一致（存储/导出零变化）；
+# UI 异常自动回退 API 路径。False = 恢复原直连 API 模式。
+UI_DRIVEN = True
+
 # 普通接口请求的随机间隔区间（秒），节奏较旧版放慢，模拟真人抖动
-CRAWLER_SLEEP_MIN = 3
-CRAWLER_SLEEP_MAX = 8
+CRAWLER_SLEEP_MIN = 6
+CRAWLER_SLEEP_MAX = 15
 
 # 访问用户主页（解析小红书号）的随机间隔区间（秒），主页请求最敏感，大幅放慢
-CREATOR_SLEEP_MIN = 15
-CREATOR_SLEEP_MAX = 40
+CREATOR_SLEEP_MIN = 25
+CREATOR_SLEEP_MAX = 60
 
 # 长尾停顿：每次等待都有一定概率变成长停顿，模拟真人走神/看内容（而非均匀机械节奏）
-LONG_TAIL_PAUSE_PROB = 0.12     # 触发长停顿的概率
-LONG_PAUSE_MIN = 20             # 长停顿时长区间（秒）
-LONG_PAUSE_MAX = 90
+LONG_TAIL_PAUSE_PROB = 0.20     # 触发长停顿的概率
+LONG_PAUSE_MIN = 30             # 长停顿时长区间（秒）
+LONG_PAUSE_MAX = 180
 
 # 会话制休息：每累计若干“动作”强制休息一次，歇完继续，不截断任务、不限制总量
-SESSION_ACTION_COUNT = 8        # 每 N 个动作触发一次会话休息
-SESSION_REST_MIN = 180         # 会话休息时长区间（秒，约 3-7 分钟）
-SESSION_REST_MAX = 420
+SESSION_ACTION_COUNT = 6        # 每 N 个动作触发一次会话休息
+SESSION_REST_MIN = 300         # 会话休息时长区间（秒，约 5-10 分钟）
+SESSION_REST_MAX = 600
 
 # 主页访问的额外长休息：每访问若干个新主页插一次长休息，之后继续、无人数上限
-CREATOR_REST_EVERY = 6
+CREATOR_REST_EVERY = 4
 CREATOR_LONG_REST_MIN = 120    # 主页长休息时长区间（秒，约 2-5 分钟）
 CREATOR_LONG_REST_MAX = 300
 

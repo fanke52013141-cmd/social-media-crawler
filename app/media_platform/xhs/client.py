@@ -109,6 +109,9 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         self.init_proxy_pool(proxy_ip_pool)
         # 公共拟人化节奏（真人动作 + 随机等待 + 长尾停顿 + 会话休息）
         self._rhythm = HumanRhythm(playwright_page)
+        # UI 驱动桥接层（config.UI_DRIVEN 时由 core 注入）：
+        # 取数走真实页面操作+响应拦截，UI 异常自动回退本文件的 API 路径。
+        self.ui_bridge = None
 
     async def _human_action(self):
         """拟人化真人动作（委托公共模块）。"""
@@ -381,6 +384,15 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         Returns:
 
         """
+        if self.ui_bridge is not None:
+            try:
+                return await self.ui_bridge.search_notes(keyword, page, sort)
+            except (RiskControlError, CaptchaError, IPBlockError,
+                    PlatformAccessError, NoteNotFoundError):
+                raise
+            except Exception as e:
+                utils.logger.warning(
+                    f"[XiaoHongShuClient] UI 搜索失败，回退 API 路径: {e}")
         uri = "/api/sns/web/v1/search/notes"
         data = {
             "keyword": keyword,
@@ -408,6 +420,15 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         Returns:
 
         """
+        if self.ui_bridge is not None:
+            try:
+                return await self.ui_bridge.note_detail(note_id, xsec_source, xsec_token)
+            except (RiskControlError, CaptchaError, IPBlockError,
+                    PlatformAccessError, NoteNotFoundError):
+                raise
+            except Exception as e:
+                utils.logger.warning(
+                    f"[XiaoHongShuClient] UI 详情失败，回退 API 路径 note={note_id}: {e}")
         if xsec_source == "":
             xsec_source = "pc_search"
 
@@ -506,6 +527,15 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         Returns:
 
         """
+        if self.ui_bridge is not None:
+            try:
+                return await self._ui_all_comments(note_id, xsec_token, callback, max_count)
+            except (RiskControlError, CaptchaError, IPBlockError,
+                    PlatformAccessError, NoteNotFoundError):
+                raise
+            except Exception as e:
+                utils.logger.warning(
+                    f"[XiaoHongShuClient] UI 评论失败，回退 API 路径 note={note_id}: {e}")
         result = []
         comments_has_more = True
         comments_cursor = ""
@@ -534,6 +564,45 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 callback=callback,
             )
             result.extend(sub_comments)
+        return result
+
+    async def _ui_all_comments(
+        self,
+        note_id: str,
+        xsec_token: str,
+        callback: Optional[Callable],
+        max_count: int,
+    ) -> List[Dict]:
+        """UI 驱动评论采集：真实滚动评论区/点击展开回复，拦截页面自身的评论响应。
+        回调、子评论、数量裁剪逻辑与 API 路径完全一致，存储字段零变化。"""
+        result: List[Dict] = []
+        async for kind, payload in self.ui_bridge.comment_batches(note_id, xsec_token):
+            comments = payload.get("comments") or []
+            if not comments:
+                if kind == "root" and not payload.get("has_more", False):
+                    break
+                continue
+            if kind == "root":
+                if len(result) + len(comments) > max_count:
+                    comments = comments[: max_count - len(result)]
+                if callback:
+                    await callback(note_id, comments)
+                await self._random_sleep()
+                result.extend(comments)
+                # 一级评论内联携带的子评论（与 API 路径同逻辑）
+                if config.ENABLE_GET_SUB_COMMENTS:
+                    for c in comments:
+                        subs = c.get("sub_comments") or []
+                        if subs and callback:
+                            await callback(c.get("note_id") or note_id, subs)
+                        result.extend(subs)
+            else:
+                if callback:
+                    await callback(note_id, comments)
+                await self._random_sleep()
+                result.extend(comments)
+            if len(result) >= max_count:
+                break
         return result
 
     async def get_comments_all_sub_comments(
@@ -637,7 +706,10 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                 await page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
-            await page.wait_for_timeout(2000)
+            # 真实访问主页：拟人化浏览停留后再解析，而非落地即取数
+            rhythm = HumanRhythm(page)
+            await rhythm.browse_step()
+            await asyncio.sleep(random.uniform(3, 8))
 
             info = await page.evaluate(
                 """() => {

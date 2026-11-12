@@ -2,11 +2,13 @@
 # 后台调度器：在服务进程内以守护线程运行，周期性检查任务，到点启动一轮采集，
 # 收尾后调用导出器生成多 sheet Excel。
 # 重要边界：仅在工作台服务运行时才调度；服务未启动期间错过的任务不补跑（不做开机自启）。
+import hashlib
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Optional
 
+import config
 from tools import task_store, orchestrator, time_util
 
 TICK_SECONDS = 5
@@ -102,6 +104,15 @@ class Scheduler:
         if now < run_today:
             return None
         win = task_store.compute_window(task, run_today)
+        # 每日任务随机抖动：按「任务ID+日期」确定性种子延后 0–N 分钟启动，
+        # 消除"每天准点同一时刻"的机器特征；同日多次 tick 抖动值稳定，不漂移。
+        # 只延后不提前；窗口仍按原执行时刻回推，语义不变。
+        jitter_max = int(getattr(config, "SCHED_JITTER_MAX_MIN", 90))
+        if jitter_max > 0:
+            seed = int(hashlib.md5(
+                f"{task['id']}:{today_str}".encode("utf-8")).hexdigest()[:8], 16)
+            if now < run_today + timedelta(minutes=seed % (jitter_max + 1)):
+                return None
         return {
             "win_start": win["win_start"],
             "win_end": win["win_end"],

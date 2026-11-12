@@ -143,6 +143,15 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
             # Create a client to interact with the Xiaohongshu website.
             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
+            if getattr(config, "UI_DRIVEN", False):
+                # UI 驱动：取数走真实页面操作+响应拦截（无头运行，不占屏幕），
+                # UI 异常时 client 自动回退 API 路径，功能保全。
+                from .ui_bridge import XhsUIBridge
+                self.xhs_client.ui_bridge = XhsUIBridge(
+                    self.browser_context, self.context_page, self.index_url,
+                    captcha_handler=self._handle_captcha,
+                )
+                utils.logger.info("[XiaoHongShuCrawler] UI 驱动采集已启用（真实页面行为+响应拦截）")
             if config.CRAWL_MODE == "guest":
                 # 游客模式：不检查登录态、不扫码，直接以游客身份采集公开可见内容
                 utils.logger.info(
@@ -191,11 +200,13 @@ class XiaoHongShuCrawler(AbstractCrawler):
         if config.CRAWLER_MAX_NOTES_COUNT < xhs_limit_count:
             config.CRAWLER_MAX_NOTES_COUNT = xhs_limit_count
         start_page = config.START_PAGE
-        # 有时间窗时按「最新」排序，让窗口内的新帖优先出现；无窗口保持综合排序。
-        # 修复：窄窗口（如仅当天）+ 综合排序时，首页全是旧帖导致 0 结果。
+        # 有时间窗时强制按「最新」排序：窗口语义依赖时序（早停也依赖），
+        # 不受 SORT_TYPE（如热度排序）覆盖；无窗口时沿用 SORT_TYPE/综合排序。
         has_window = bool(getattr(config, "TIME_START", "") or getattr(config, "TIME_END", ""))
-        default_sort = SearchSortType.LATEST if has_window else SearchSortType.GENERAL
-        sort = SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else default_sort
+        if has_window:
+            sort = SearchSortType.LATEST
+        else:
+            sort = SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL
         # 页数上限＝配额页数；窗口模式额外 +2 页用于翻找窗口内帖子。
         # 修复：原循环按「已翻页数」计配额，首页无窗口内帖子时直接结束，永远采不到。
         max_pages = (config.CRAWLER_MAX_NOTES_COUNT + xhs_limit_count - 1) // xhs_limit_count
@@ -209,6 +220,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             utils.logger.info(f"[XiaoHongShuCrawler.search] Current search keyword: {keyword}")
             page = 1
             saved_count = 0
+            out_streak = 0  # 连续窗口外帖子计数（时间窗早停用）
             search_id = get_search_id()
             while page <= max_pages and saved_count < config.CRAWLER_MAX_NOTES_COUNT:
                 if page < start_page:
@@ -248,7 +260,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                                     f"[XiaoHongShuCrawler.search] skip out-of-window note {note_detail.get('note_id')}, "
                                     f"time={note_detail.get('time')}"
                                 )
+                                out_streak += 1
                                 continue
+                            out_streak = 0
                             await xhs_store.update_xhs_note(note_detail)
                             await self.download_media(note_detail)
                             note_ids.append(note_detail.get("note_id"))
@@ -261,6 +275,14 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     # 拟人化等待（真人鼠标动作 + 长尾停顿 + 会话休息）
                     await self.xhs_client._random_sleep()
                     utils.logger.info(f"[XiaoHongShuCrawler.search] 页面 {page-1} 后拟人化等待完成")
+                    # 时间窗早停：按「最新」排序时连续 N 条窗口外帖子即结束该关键词翻页，
+                    # 每日采集量自然收敛到窗口内新发布量（无硬上限）；窗口内数据一条不少。
+                    if (has_window and sort == SearchSortType.LATEST
+                            and out_streak >= getattr(config, "WINDOW_EARLY_STOP_STREAK", 5)):
+                        utils.logger.info(
+                            f"[XiaoHongShuCrawler.search] 连续 {out_streak} 条窗口外帖子，"
+                            f"关键词 {keyword} 提前停止翻页（第 {page-1} 页）")
+                        break
                     # 末页（has_more=False）的帖子也要处理完再退出，不能整页丢弃
                     if not notes_res.get("has_more", False):
                         utils.logger.info("[XiaoHongShuCrawler.search] No more content!")
@@ -599,6 +621,11 @@ class XiaoHongShuCrawler(AbstractCrawler):
             )
             self.xhs_client.headers["Cookie"] = cookie_str
             self.xhs_client.cookie_dict = cookie_dict
+            # 浏览器已重建：同步 client 持有的页面引用与 UI 桥接层/拟人化节奏绑定
+            self.xhs_client.playwright_page = self.context_page
+            self.xhs_client._rhythm.bind(self.context_page)
+            if getattr(self.xhs_client, "ui_bridge", None) is not None:
+                self.xhs_client.ui_bridge.rebind(self.browser_context, self.context_page)
             utils.logger.info("人机验证已通过，继续采集 ...")
         finally:
             self._busy_solving_captcha = False
@@ -695,6 +722,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
 
     async def close(self):
         """Close browser context"""
+        # 先关 UI 桥接层的独立搜索标签页（若存在）
+        if getattr(self, "xhs_client", None) is not None and getattr(
+                self.xhs_client, "ui_bridge", None) is not None:
+            await self.xhs_client.ui_bridge.close()
         # Special handling if using CDP mode
         if self.cdp_manager:
             await self.cdp_manager.cleanup()
