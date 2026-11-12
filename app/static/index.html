@@ -340,6 +340,7 @@
         <div class="identity-row" id="loginRow" style="margin-top:11px">
           <span class="login-status" id="loginSummary"></span>
           <button class="btn-mini" id="loginOnlyBtn">扫码登录</button>
+<button class="btn-mini" id="logoutBtn" title="隔离当前登录目录为备份（不删除），重置登录态；下次扫码可登录其他账号">退出登录</button>
         </div>
         <div class="hint-box" id="guestHint"><span id="guestHintText"></span></div>
       </div>
@@ -554,6 +555,23 @@ async function loginOnly(){
   await startNextLogin();
 }
 $('#loginOnlyBtn').onclick=loginOnly;
+
+async function logoutPlats(){
+  const st=await(await fetch('/api/status')).json();
+  if(st.running){alert('当前有任务正在运行，请先停止');return;}
+  const sel=Array.from(F.plats);
+  if(!sel.length){alert('请先选择要退出登录的平台');return;}
+  await loadLoginState();
+  const logged=sel.filter(c=>(loginStates[c]||{}).logged_in);
+  const targets=logged.length?logged:sel;
+  if(!confirm('退出登录会把当前登录目录隔离为备份（不删除数据），并重置登录态。\n平台：'+targets.join('、')+'\n之后点「扫码登录」即可登录其他账号。\n确认退出？'))return;
+  const r=await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({platforms:targets})});
+  if(!r.ok){alert('退出登录失败：'+(await r.text()));return;}
+  await loadLoginState();renderFormPlats();refreshIdentity();
+  alert('已退出登录。点「扫码登录」即可登录其他账号。');
+}
+$('#logoutBtn').onclick=logoutPlats;
 
 /* ==================== 步骤5：采集内容 ==================== */
 function refreshDataMode(){

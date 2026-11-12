@@ -9,6 +9,7 @@ from tools import login_state
 from tools import task_store, orchestrator, task_exporter
 from tools import settings
 from tools.scheduler import scheduler
+import config
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -196,6 +197,40 @@ def login_only(request: Request):
         state["meta"] = {"platform": plat, "data_mode": "content",
                          "crawl_mode": "login", "login_only": True}
     return {"ok": True, "pid": state["proc"].pid, "platform": plat, "login_only": True}
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    """退出登录/换号：把指定平台的登录目录隔离为备份（不删除任何数据），
+    并重置登录态缓存；下次「扫码登录」即全新登录，可登录其他账号。"""
+    import asyncio
+    async def _read():
+        try:
+            return await request.json()
+        except Exception:
+            return {}
+    body = asyncio.run(_read())
+    plats = body.get("platforms") or ([body["platform"]] if body.get("platform") else [])
+    plats = [p for p in plats if p in CODES]
+    if not plats:
+        raise HTTPException(400, "bad platform")
+    with state["lock"]:
+        p = state["proc"]
+        if p and p.poll() is None:
+            raise HTTPException(409, "已有任务正在运行，请先停止再退出登录")
+        backed_up = []
+        for plat in plats:
+            d = ROOT / "browser_data" / (config.USER_DATA_DIR % plat)
+            if d.exists():
+                bak = d.with_name(d.name + time.strftime("_bak_%Y%m%d%H%M%S"))
+                d.rename(bak)
+                backed_up.append(plat)
+            login_state._merge(plat, {"logged_in": False, "profile_exists": False,
+                                      "last_checked": "", "detail": "已退出登录，登录目录已隔离备份"})
+        if QR_STATE.exists():
+            QR_STATE.unlink()
+    return {"ok": True, "logged_out": plats, "profile_backed_up": backed_up,
+            "platforms": login_state.snapshot()}
 
 
 @app.post("/api/stop")
