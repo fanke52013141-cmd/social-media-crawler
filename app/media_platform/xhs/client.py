@@ -371,6 +371,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
         page_size: int = 20,
         sort: SearchSortType = SearchSortType.GENERAL,
         note_type: SearchNoteType = SearchNoteType.ALL,
+        time_filter: str = "",
     ) -> Dict:
         """
         Search notes by keyword
@@ -380,13 +381,14 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             page_size: Page data length
             sort: Search result sorting specification
             note_type: Type of note to search
+            time_filter: UI 面板「发布时间」预筛选项（一天内/一周内/半年内），空为不限
 
         Returns:
 
         """
         if self.ui_bridge is not None:
             try:
-                return await self.ui_bridge.search_notes(keyword, page, sort)
+                return await self.ui_bridge.search_notes(keyword, page, sort, time_filter)
             except (RiskControlError, CaptchaError, IPBlockError,
                     PlatformAccessError, NoteNotFoundError):
                 raise

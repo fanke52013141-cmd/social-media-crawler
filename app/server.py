@@ -303,6 +303,20 @@ def status():
         if started_ts:
             from tools.live_count import live_counts
             live = live_counts(plat_code, started_ts, meta.get("data_mode", "content"))
+    # 统一计数口径：进度时间线的 saved/comment 以 jsonl 落盘计数为准。
+    # 日志解析只覆盖部分平台且仅读最近 200 行，会少计；落盘行与导出同源，全平台准确。
+    if live and prog:
+        prog["counts"]["saved"] = live["saved"]
+        prog["counts"]["comment"] = live["comment"]
+        for m in prog.get("timeline", []):
+            if m.get("key") == "collect":
+                m.setdefault("counts", {})["saved"] = live["saved"]
+                if str(m.get("text", "")).startswith("已采集"):
+                    m["text"] = "已采集 %d 条帖子" % live["saved"]
+            elif m.get("key") == "comment":
+                m.setdefault("counts", {})["comment"] = live["comment"]
+                if str(m.get("text", "")).startswith("已采集"):
+                    m["text"] = "已采集 %d 条评论" % live["comment"]
     return {"running": running, "exit_code": None, "tail": log_lines[-40:],
             "progress": prog, "live_counts": live, "task_id": tid or "",
             "task_name": task["name"] if task else ""}

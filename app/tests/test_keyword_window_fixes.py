@@ -52,7 +52,7 @@ class TestXhsWindowSearch:
         c = XiaoHongShuCrawler()
         calls = {"sorts": [], "pages": [], "saved": []}
 
-        async def fake_keyword(keyword, search_id, page, sort):
+        async def fake_keyword(keyword, search_id, page, sort, time_filter=""):
             calls["sorts"].append(sort.value)
             calls["pages"].append(page)
             if page == 1:
@@ -110,7 +110,7 @@ class TestXhsWindowSearch:
         monkeypatch.setattr(config, "TIME_START", "")
         monkeypatch.setattr(config, "TIME_END", "")
 
-        async def only_last_page(keyword, search_id, page, sort):
+        async def only_last_page(keyword, search_id, page, sort, time_filter=""):
             return {"has_more": False,
                     "items": [{"id": "new1", "model_type": "note", "xsec_token": "t"}]}
 

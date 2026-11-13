@@ -15,6 +15,7 @@
 不占用屏幕：全程运行在无头浏览器中；仅验证码时经 captcha_handler 弹小窗。
 """
 import asyncio
+import json
 import random
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
@@ -41,6 +42,29 @@ SEARCH_PATH = "/api/sns/web/v2/search/notes"
 FEED_PATH = "/api/sns/web/v1/feed"
 COMMENT_PATH = "/api/sns/web/v2/comment/page"
 SUB_COMMENT_PATH = "/api/sns/web/v2/comment/sub/page"
+
+
+def time_filter_for_window(win_start: str, win_end: str) -> str:
+    """把任务时间窗长度映射为搜索面板「发布时间」预筛选项。
+
+    平台选项只有 不限/一天内/一周内/半年内（滚动时长，非自然日），
+    故预筛后仍需精确时间窗二次过滤。映射取「不小于窗口的最小档位」，
+    避免误杀窗口内帖子：≤1天→一天内；≤7天→一周内；≤180天→半年内；
+    更长或窗口不完整→不限（返回空串，不点选）。
+    """
+    from tools import time_util
+    ts = time_util.iso_to_ts(str(win_start or "").strip())
+    te = time_util.iso_to_ts(str(win_end or "").strip())
+    if not ts or not te or te <= ts:
+        return ""
+    days = (te - ts) / 86400.0
+    if days <= 1:
+        return "一天内"
+    if days <= 7:
+        return "一周内"
+    if days <= 180:
+        return "半年内"
+    return ""
 
 
 class XhsUIBridge:
@@ -76,6 +100,23 @@ class XhsUIBridge:
                 q = queue_map.get(path)
                 if q is None:
                     return
+                if path == SEARCH_PATH:
+                    # 取证日志：页面真实搜索请求携带的筛选参数（排序/发布时间）
+                    try:
+                        body = resp.request.post_data
+                        if body:
+                            bd = json.loads(body)
+                            fs = bd.get("filters") or []
+                            st = next((f.get("tags", [""])[0] for f in fs
+                                       if f.get("type") == "sort_type"), "")
+                            nt = next((f.get("tags", [""])[0] for f in fs
+                                       if f.get("type") == "filter_note_time"), "")
+                            if st or nt:
+                                utils.logger.info(
+                                    f"[UIBridge] 搜索请求筛选 sort_type={st or 'general'} "
+                                    f"filter_note_time={nt or '不限'}")
+                    except Exception:
+                        pass
                 data = None
                 try:
                     data = await resp.json()
@@ -152,8 +193,12 @@ class XhsUIBridge:
         return self._search_page
 
     async def search_notes(self, keyword: str, page: int,
-                           sort: SearchSortType) -> Dict:
-        """真实搜索页 + 滚动翻页，返回与 API 同构的 {has_more, items}。"""
+                           sort: SearchSortType, time_filter: str = "") -> Dict:
+        """真实搜索页 + 滚动翻页，返回与 API 同构的 {has_more, items}。
+
+        time_filter：面板「发布时间」预筛选项（一天内/一周内/半年内），
+        由任务窗口长度映射而来；空串表示不限。预筛后调用方仍做精确窗口二次过滤。
+        """
         sp = await self._ensure_search_page()
         rhythm = HumanRhythm(sp)
         if keyword != self._search_keyword or page <= 1:
@@ -176,15 +221,28 @@ class XhsUIBridge:
                 except Exception as e:
                     utils.logger.warning(f"[UIBridge] 回车重搜失败: {e}")
             if sort == SearchSortType.LATEST:
-                # 点击「最新」排序标签，触发页面自己按时间排序重新搜索
+                # 排序/发布时间选项藏在「筛选」按钮的悬停面板里（实测：hover 展开、
+                # 点击反而收起）。一次展开依次点「最新」+「发布时间」，页面以
+                # filters.sort_type=time_descending + filter_note_time 重新搜索。
                 try:
-                    tab = sp.get_by_text("最新", exact=True).first
-                    await click_human(sp, tab, timeout=8000)
-                    latest = await self._wait_resp(self._search_queue, 20)
-                    if latest is not None:
-                        result = latest
+                    if await self._apply_search_filters(sp, time_filter):
+                        # 两次点击各触发一次重搜：稍候后取队列里最后一条响应
+                        await asyncio.sleep(2.0)
+                        latest = None
+                        for status, headers, data in reversed(self._drain(self._search_queue)):
+                            r = await self._check(status, headers, data)
+                            if r is not None:
+                                latest = r
+                                break
+                        if latest is None:
+                            latest = await self._wait_resp(self._search_queue, 20)
+                        if latest is not None:
+                            result = latest
+                except (RiskControlError, CaptchaError, IPBlockError,
+                        PlatformAccessError):
+                    raise  # 风控语义与 API 路径一致：向上抛出触发熔断
                 except Exception as e:
-                    utils.logger.warning(f"[UIBridge] 点击「最新」排序失败，沿用当前排序: {e}")
+                    utils.logger.warning(f"[UIBridge] 应用搜索筛选失败，沿用当前结果: {e}")
             if result is None:
                 # SSR 兜底：搜索页首屏可能走 SSR 不发 /search/notes XHR，
                 # 从 __INITIAL_STATE__.search 取首屏结果（主世界执行）。
@@ -201,6 +259,91 @@ class XhsUIBridge:
             return {"has_more": False, "items": []}
         await rhythm.human_pause(1.0, 3)
         return result
+
+    async def _apply_search_filters(self, sp: Page, time_filter: str = "") -> bool:
+        """展开「筛选」悬停面板，依次选择「最新」排序与「发布时间」预筛。
+
+        返回「最新」是否点击成功（发布时间选项缺失时仅告警，不影响排序）。
+        实测结构（2026-11）：选项为 .filters 容器下 class=tags 的 span；
+        面板对鼠标路径敏感：需从按钮缓慢移入保持悬停链；直接 click 会被
+        mask 拦截或把面板收起，故用坐标点击 + active 校验 + JS 点击兜底。
+        """
+        fl = sp.locator(".filter").first
+        await fl.hover(timeout=5000)
+        await asyncio.sleep(random.uniform(0.8, 1.5))
+        fb = await fl.bounding_box()
+        if fb:  # Playwright 返回 width/height，归一化为选项包围盒的 w/h
+            fb = {"x": fb["x"], "y": fb["y"], "w": fb["width"], "h": fb["height"]}
+        ok, latest_box = await self._click_panel_tag(sp, "最新", fb)
+        if ok:
+            utils.logger.info("[UIBridge] 已应用搜索筛选：排序=最新，发布时间=%s"
+                              % (time_filter or "不限"))
+        if ok and time_filter:
+            await asyncio.sleep(random.uniform(0.6, 1.2))
+            tok, _ = await self._click_panel_tag(sp, time_filter, latest_box or fb)
+            if not tok:
+                utils.logger.warning(
+                    f"[UIBridge] 发布时间选项「{time_filter}」未找到，沿用不限")
+        # 移开鼠标收起悬停面板，避免遮挡后续滚动翻页
+        await sp.mouse.move(random.randint(400, 800), random.randint(500, 700))
+        return ok
+
+    async def _click_panel_tag(self, sp: Page, text: str,
+                               start_box: Optional[Dict]) -> Tuple[bool, Optional[Dict]]:
+        """在已展开的筛选面板内点击指定文本的选项。返回 (是否成功, 选项包围盒)。
+
+        start_box：鼠标移入的起点（筛选按钮或上一个选项），分步缓慢移动
+        保持悬停链不断；点击后校验 active 状态，未生效则 JS 点击兜底。
+        """
+        box = await sp.evaluate(
+            """(label) => {
+              const tags = document.querySelectorAll('.filters .tags');
+              for (const t of tags) {
+                if (t.textContent.trim() === label) {
+                  const r = t.getBoundingClientRect();
+                  if (r.width > 0 && r.height > 0)
+                    return {x: r.x, y: r.y, w: r.width, h: r.height};
+                }
+              }
+              return null;
+            }""", text, isolated_context=False)
+        if not box:
+            return False, None
+        cx, cy = box["x"] + box["w"] / 2, box["y"] + box["h"] / 2
+        if start_box:
+            sx = start_box["x"] + start_box["w"] / 2
+            sy = start_box["y"] + start_box["h"] / 2
+            steps = random.randint(10, 14)
+            await sp.mouse.move(sx, sy)
+            for i in range(1, steps + 1):
+                await sp.mouse.move(sx + (cx - sx) * i / steps,
+                                    sy + (cy - sy) * i / steps)
+                await asyncio.sleep(random.uniform(0.02, 0.06))
+            await asyncio.sleep(random.uniform(0.2, 0.5))
+        await sp.mouse.click(cx, cy)
+        await asyncio.sleep(0.6)
+        active = await sp.evaluate(
+            """(label) => {
+              const tags = document.querySelectorAll('.filters .tags');
+              for (const t of tags) {
+                if (t.textContent.trim() === label)
+                  return String(t.className).includes('active');
+              }
+              return false;
+            }""", text, isolated_context=False)
+        if not active:
+            await sp.evaluate(
+                """(label) => {
+                  const tags = document.querySelectorAll('.filters .tags');
+                  for (const t of tags) {
+                    if (t.textContent.trim() === label) {
+                      (t.querySelector('span') || t).click();
+                      return true;
+                    }
+                  }
+                  return false;
+                }""", text, isolated_context=False)
+        return True, box
 
     async def _ssr_search_notes(self, sp: Page) -> Optional[Dict]:
         """搜索页 SSR 兜底：从 __INITIAL_STATE__.search.feeds 提取首屏结果（主世界执行）。

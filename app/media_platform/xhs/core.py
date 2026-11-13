@@ -58,6 +58,7 @@ from .exception import (
     PlatformAccessError,
 )
 from .field import SearchSortType
+from .ui_bridge import time_filter_for_window
 from .help import parse_note_info_from_note_url, parse_creator_info_from_url, get_search_id
 from .login import XiaoHongShuLogin
 
@@ -209,6 +210,10 @@ class XiaoHongShuCrawler(AbstractCrawler):
             sort = SearchSortType.LATEST
         else:
             sort = SearchSortType(config.SORT_TYPE) if config.SORT_TYPE != "" else SearchSortType.GENERAL
+        # 平台侧「发布时间」预筛：按窗口长度选 一天内/一周内/半年内，
+        # 先把窗口外旧帖挡在搜索结果外，减少无效详情抓取；精确窗口二次过滤仍保留。
+        time_filter = time_filter_for_window(
+            getattr(config, "TIME_START", ""), getattr(config, "TIME_END", "")) if has_window else ""
         # 页数上限＝配额页数；窗口模式额外 +2 页用于翻找窗口内帖子。
         # 修复：原循环按「已翻页数」计配额，首页无窗口内帖子时直接结束，永远采不到。
         max_pages = (config.CRAWLER_MAX_NOTES_COUNT + xhs_limit_count - 1) // xhs_limit_count
@@ -239,6 +244,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         search_id=search_id,
                         page=page,
                         sort=sort,
+                        time_filter=time_filter,
                     )
                     utils.logger.info(f"[XiaoHongShuCrawler.search] Search notes response: {notes_res}")
                     if not notes_res or not notes_res.get("items"):

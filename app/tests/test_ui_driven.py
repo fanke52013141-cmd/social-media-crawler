@@ -53,7 +53,7 @@ class TestWindowEarlyStop:
         return c, calls
 
     def _set_pages(self, c, calls, pages):
-        async def fake_keyword(keyword, search_id, page, sort):
+        async def fake_keyword(keyword, search_id, page, sort, time_filter=""):
             calls["pages"].append(page)
             return pages[page - 1]
         c.xhs_client.get_note_by_keyword = fake_keyword
@@ -92,14 +92,18 @@ class TestWindowEarlyStop:
         # 即使 SORT_TYPE 配置为热度排序，窗口模式仍强制最新（早停依赖时序）
         monkeypatch.setattr(config, "SORT_TYPE", "popularity_descending")
         sorts = []
+        time_filters = []
 
-        async def fake_keyword(keyword, search_id, page, sort):
+        async def fake_keyword(keyword, search_id, page, sort, time_filter=""):
             sorts.append(sort.value)
+            time_filters.append(time_filter)
             return self._items(["new1"], has_more=False)
 
         c.xhs_client.get_note_by_keyword = fake_keyword
         asyncio.run(c.search())
         assert sorts == ["time_descending"]
+        # 一天窗口 → 平台侧「发布时间」预筛选项为一天内
+        assert time_filters == ["一天内"]
         assert calls["saved"] == ["new1"]
 
     def test_below_streak_keeps_paging(self, crawler):

@@ -12,6 +12,7 @@ from typing import Dict, Optional, Tuple
 from tools import task_store, time_util
 from tools import risk_signals
 from tools import task_exporter
+from tools.live_count import live_counts
 
 ROOT = os.getcwd()
 PY = sys.executable
@@ -100,13 +101,26 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT)
     out.close()
 
+    data_mode = task.get("data_mode", "content")
+    last_count_ts = 0.0
     while True:
         rc = proc.poll()
         if rc is not None:
             break
         if _is_stop(task_id):
             _kill_tree(proc)
-            return {"status": "stopped", "contents": 0, "comments": 0, "message": "已手动停止"}
+            live = live_counts(platform, run_start_ts, data_mode)
+            return {"status": "stopped", "contents": live["saved"],
+                    "comments": live["comment"], "message": "已手动停止"}
+        # 运行中每 10 秒把落盘计数写回任务卡（与进度卡大数字同源），
+        # 避免任务列表在采集期间一直显示 0
+        now = time.time()
+        if now - last_count_ts >= 10:
+            last_count_ts = now
+            live = live_counts(platform, run_start_ts, data_mode)
+            task_store.update_platform_status(
+                task_id, platform,
+                {"contents": live["saved"], "comments": live["comment"]})
         time.sleep(2)
 
     # 本任务在该平台、本轮窗口内、关键词下、去重后的总条数（与导出口径一致）
