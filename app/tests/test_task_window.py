@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+import config
 from tools import task_store, task_exporter, time_util
 from tools.scheduler import Scheduler
 
@@ -101,7 +102,9 @@ class TestCreateTask:
 
 
 class TestSchedulerDue:
-    def test_daily_due_returns_today_window(self, store_tmp):
+    def test_daily_due_returns_today_window(self, store_tmp, monkeypatch):
+        # 关闭每日启动抖动，确定性验证窗口逻辑（抖动行为由 test_ui_driven 独立覆盖）
+        monkeypatch.setattr(config, "SCHED_JITTER_MAX_MIN", 0)
         t = task_store.create_task(_payload(schedule_type="daily", run_time="09:00"))
         # 强制生效日期为今天，保证可触发
         task_store.update_task(t["id"], {"start_date": datetime.now().strftime("%Y-%m-%d")})

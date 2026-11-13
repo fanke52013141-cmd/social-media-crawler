@@ -229,6 +229,11 @@
     border-radius:50%;animation:rot .8s linear infinite;flex:none}
   @keyframes rot{to{transform:rotate(360deg)}}
   .prog-current.done .spin-dot{display:none}
+  .prog-live{display:flex;align-items:baseline;gap:8px;margin:2px 0 14px;padding:10px 14px;
+    background:var(--brand-soft);border:1px solid var(--brand-line);border-radius:var(--r-md)}
+  .prog-live-num{font-size:30px;font-weight:800;color:var(--brand);line-height:1;font-variant-numeric:tabular-nums}
+  .prog-live-unit{font-size:13px;font-weight:700;color:var(--body)}
+  .prog-live-sub{font-size:12px;color:var(--sub);margin-left:auto;font-weight:600}
   .timeline{list-style:none;margin:0;padding:0}
   .timeline li{position:relative;padding:0 0 16px 26px}
   .timeline li:last-child{padding-bottom:0}
@@ -422,6 +427,11 @@
   <div class="card prog-card" id="progCard">
     <div class="card-label">运行进度</div>
     <div class="prog-current" id="progCurrent"><span class="spin-dot"></span><span id="progCurrentText"></span></div>
+    <div class="prog-live" id="progLive">
+      <span class="prog-live-num" id="progLiveNum">0</span>
+      <span class="prog-live-unit" id="progLiveUnit">条帖子</span>
+      <span class="prog-live-sub" id="progLiveSub"></span>
+    </div>
     <ul class="timeline" id="progTimeline"></ul>
     <div class="prog-error" id="progError"></div>
     <div class="collapse" id="logCollapse">
@@ -819,6 +829,19 @@ function renderProgress(pg){
   const cur=$('#progCurrent');
   cur.classList.toggle('done',pg.finished);
   $('#progCurrentText').textContent=pg.error?pg.error:(pg.current||'准备中');
+  // 实时采集计数：以 jsonl 落盘行为准（全平台统一），随轮询增长，让用户心里有底
+  const lc=pg.live_counts||{};
+  const pc=pg.counts||{};
+  const saved=lc.saved||0, comment=lc.comment||0, skip=pc.skip||0, viewed=pc.viewed||0;
+  const isCommentMode=saved===0&&comment>0;
+  $('#progLiveNum').textContent=isCommentMode?comment:saved;
+  $('#progLiveUnit').textContent=isCommentMode?'条评论':'条帖子';
+  const sub=[];
+  if(viewed)sub.push('已查看 '+viewed+' 篇');
+  if(skip)sub.push('跳过 '+skip);
+  if(saved>0&&comment>0)sub.push('评论 '+comment);
+  if(pg.finished)sub.push('已完成');
+  $('#progLiveSub').textContent=sub.join(' · ');
   $('#progTimeline').innerHTML=pg.timeline.map(t=>{
     const counts=Object.entries(t.counts||{}).map(([k,v])=>
       '<span class="'+k+'">'+(COUNT_LABEL[k]||k)+' '+v+'</span>').join('');

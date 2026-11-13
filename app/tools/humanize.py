@@ -45,12 +45,14 @@ class HumanRhythm:
             page = self.page
             vp = page.viewport_size or {"width": 1280, "height": 800}
             w, h = vp.get("width", 1280), vp.get("height", 800)
-            # 分两段平滑移动鼠标，带随机落点，模拟真人非直线移动
+            from tools.human_mouse import move_human
+            # 两段弧线移动（带过冲回正），替代直线插值，更像真人手部轨迹
+            sx, sy = random.randint(0, w), random.randint(0, h)
+            mx, my = random.randint(0, w), random.randint(0, h)
             x = random.randint(int(w * 0.15), int(w * 0.85))
             y = random.randint(int(h * 0.15), int(h * 0.8))
-            await page.mouse.move(random.randint(0, w), random.randint(0, h),
-                                  steps=random.randint(5, 12))
-            await page.mouse.move(x, y, steps=random.randint(8, 18))
+            await move_human(page, sx, sy, mx, my)
+            await move_human(page, mx, my, x, y)
             # 偶尔小幅滚动页面
             if random.random() < 0.4:
                 await page.mouse.wheel(0, random.randint(120, 600))

@@ -24,6 +24,7 @@ from patchright.async_api import BrowserContext, Page
 import config
 from tools import utils, risk_signals
 from tools.humanize import HumanRhythm
+from tools.human_mouse import click_human
 
 from .exception import (
     CaptchaError,
@@ -169,7 +170,7 @@ class XhsUIBridge:
                     box = sp.locator(
                         "input#search-input, input[placeholder*='搜索'], "
                         ".search-input input, input.search-input").first
-                    await box.click(timeout=5000)
+                    await click_human(sp, box, timeout=5000)
                     await box.press("Enter")
                     result = await self._wait_resp(self._search_queue, 12)
                 except Exception as e:
@@ -178,7 +179,7 @@ class XhsUIBridge:
                 # 点击「最新」排序标签，触发页面自己按时间排序重新搜索
                 try:
                     tab = sp.get_by_text("最新", exact=True).first
-                    await tab.click(timeout=8000)
+                    await click_human(sp, tab, timeout=8000)
                     latest = await self._wait_resp(self._search_queue, 20)
                     if latest is not None:
                         result = latest
@@ -373,7 +374,7 @@ class XhsUIBridge:
                             continue
                         await btn.scroll_into_view_if_needed(timeout=3000)
                         await self._rhythm.human_action()
-                        await btn.click(timeout=5000)
+                        await click_human(self.page, btn, timeout=5000)
                         clicked = True
                         payload = await self._wait_resp(self._sub_queue, 8)
                         if payload is not None:

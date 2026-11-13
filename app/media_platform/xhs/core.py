@@ -251,8 +251,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             semaphore=semaphore,
                         ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
                     ]
-                    note_details = await asyncio.gather(*task_list)
-                    for note_detail in note_details:
+                    # 边抓边存：每篇详情抓完立即落盘，实时计数随之增长，中断也不丢已采数据。
+                    # （原为 gather 攒齐整批再保存，导致采集全程计数为 0、用户看不到进度。）
+                    note_details = []
+                    for coro in asyncio.as_completed(task_list):
+                        note_detail = await coro
+                        note_details.append(note_detail)
                         if note_detail:
                             # 时间窗过滤：发布时间不在窗口内的跳过，不入库、不计数
                             if not time_util.in_window(note_detail.get("time")):

@@ -89,7 +89,9 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
         return {"status": "skipped", "contents": 0, "comments": 0, "message": "该平台无链接，跳过"}
 
     run_start_ts = time.time()
-    task_store.update_platform_status(task_id, platform, {"status": "running", "message": "采集中"})
+    task_store.update_platform_status(task_id, platform,
+                                      {"status": "running", "message": "采集中",
+                                       "started_ts": run_start_ts})
 
     log_path = os.path.join(ROOT, "data", f"orchestrator_{task_id}_{platform}.log")
     out = open(log_path, "a", encoding="utf-8")

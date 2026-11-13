@@ -96,7 +96,7 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
 
     ms = {k: {"key": k, "label": MILESTONE_LABEL[k], "text": "",
               "time": "", "state": "pending", "counts": {}} for k in order}
-    counts = {"saved": 0, "skip": 0, "comment": 0}
+    counts = {"saved": 0, "skip": 0, "comment": 0, "viewed": 0}
     current = "准备开始"
     error = ""
     last_items: List[str] = []
@@ -105,6 +105,9 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
     for line in lines:
         if not line.strip():
             continue
+        # 详情查看进度：抓详情阶段即累计，让用户在落盘前也能看到进展
+        if "Begin get note detail" in line:
+            counts["viewed"] += 1
         if ERROR_RE.search(line):
             error = "检测到平台安全验证或限流，已自动暂停以保护账号"
         matched = False

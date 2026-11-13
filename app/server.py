@@ -295,8 +295,16 @@ def status():
             crawl_mode=meta.get("crawl_mode", "login"),
             is_login_only=meta.get("login_only", False),
         )
+    # 实时采集计数：以 jsonl 落盘行为准（全平台统一），按本轮 started_ts 过滤，
+    # 供进度卡展示「已采 N 条」并随轮询增长。
+    live = None
+    if task and plat_code:
+        started_ts = (task.get("platform_status", {}).get(plat_code, {}) or {}).get("started_ts")
+        if started_ts:
+            from tools.live_count import live_counts
+            live = live_counts(plat_code, started_ts, meta.get("data_mode", "content"))
     return {"running": running, "exit_code": None, "tail": log_lines[-40:],
-            "progress": prog, "task_id": tid or "",
+            "progress": prog, "live_counts": live, "task_id": tid or "",
             "task_name": task["name"] if task else ""}
 
 
