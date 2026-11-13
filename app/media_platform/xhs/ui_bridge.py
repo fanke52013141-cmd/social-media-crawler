@@ -432,8 +432,9 @@ class XhsUIBridge:
     async def _read_dwell(self, note_card: Dict, note_id: str) -> None:
         """按内容长度计算阅读停留，期间拟人化滚动，并缓存顺带加载的评论。"""
         text_len = len(note_card.get("title") or "") + len(note_card.get("desc") or "")
-        # 真人阅读速度约 5–9 字/秒，取中值并加抖动；短帖至少停 4s，长帖封顶 40s
-        base = min(40.0, max(4.0, text_len / 7.0))
+        # 阅读停留：按内容长度计算并加抖动；2026-11-13 提速档——短帖至少 3s，长帖封顶 20s
+        # （原 5-9 字/秒、封顶 40s；现按约 11 字/秒的快读节奏，仍保留真人抖动与滚动）
+        base = min(20.0, max(3.0, text_len / 11.0))
         dwell = base * random.uniform(0.7, 1.5)
         steps = random.randint(2, 4)
         cached: List[Dict] = []

@@ -121,7 +121,9 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
 START_PAGE = 1
 
 # Control the number of crawled videos/posts
-CRAWLER_MAX_NOTES_COUNT = 15
+# 2026-11-13 用户要求：每个关键词最多采 200 篇，搜索自动翻页（每页 20，约 10 页）。
+# 配额按关键词独立计数；窗口模式下连续窗口外帖子早停仍生效。
+CRAWLER_MAX_NOTES_COUNT = 200
 
 # Controlling the number of concurrent crawlers
 MAX_CONCURRENCY_NUM = 1
@@ -178,23 +180,27 @@ HUMAN_BEHAVIOR = True       # 是否在页面上模拟真人鼠标移动、滚�
 # UI 异常自动回退 API 路径。False = 恢复原直连 API 模式。
 UI_DRIVEN = True
 
-# 普通接口请求的随机间隔区间（秒），节奏较旧版放慢，模拟真人抖动
-CRAWLER_SLEEP_MIN = 6
-CRAWLER_SLEEP_MAX = 15
+# 普通接口请求的随机间隔区间（秒）。
+# 2026-11-13 二次提速（用户要求 1 小时内）：3-8s → 2-5s，对齐开源社区区间
+# （MediaCrawler 默认 2s、风控严时 3-5s）。账号保护靠「首次风控即熔断 + 阶梯冷却」。
+CRAWLER_SLEEP_MIN = 2
+CRAWLER_SLEEP_MAX = 5
 
 # 访问用户主页（解析小红书号）的随机间隔区间（秒），主页请求最敏感，大幅放慢
 CREATOR_SLEEP_MIN = 25
 CREATOR_SLEEP_MAX = 60
 
 # 长尾停顿：每次等待都有一定概率变成长停顿，模拟真人走神/看内容（而非均匀机械节奏）
-LONG_TAIL_PAUSE_PROB = 0.20     # 触发长停顿的概率
-LONG_PAUSE_MIN = 30             # 长停顿时长区间（秒）
-LONG_PAUSE_MAX = 180
+# 2026-11-13 二次提速：8%×15-60s → 5%×10-30s，保留真人特征但更短更少
+LONG_TAIL_PAUSE_PROB = 0.05     # 触发长停顿的概率
+LONG_PAUSE_MIN = 10             # 长停顿时长区间（秒）
+LONG_PAUSE_MAX = 30
 
 # 会话制休息：每累计若干“动作”强制休息一次，歇完继续，不截断任务、不限制总量
-SESSION_ACTION_COUNT = 6        # 每 N 个动作触发一次会话休息
-SESSION_REST_MIN = 300         # 会话休息时长区间（秒，约 5-10 分钟）
-SESSION_REST_MAX = 600
+# 2026-11-13 二次提速：每 12 动作歇 60-150s → 每 20 动作歇 30-90s
+SESSION_ACTION_COUNT = 20       # 每 N 个动作触发一次会话休息
+SESSION_REST_MIN = 30           # 会话休息时长区间（秒，约 0.5-1.5 分钟）
+SESSION_REST_MAX = 90
 
 # 主页访问的额外长休息：每访问若干个新主页插一次长休息，之后继续、无人数上限
 CREATOR_REST_EVERY = 4

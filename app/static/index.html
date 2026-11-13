@@ -229,11 +229,14 @@
     border-radius:50%;animation:rot .8s linear infinite;flex:none}
   @keyframes rot{to{transform:rotate(360deg)}}
   .prog-current.done .spin-dot{display:none}
-  .prog-live{display:flex;align-items:baseline;gap:8px;margin:2px 0 14px;padding:10px 14px;
-    background:var(--brand-soft);border:1px solid var(--brand-line);border-radius:var(--r-md)}
-  .prog-live-num{font-size:30px;font-weight:800;color:var(--brand);line-height:1;font-variant-numeric:tabular-nums}
-  .prog-live-unit{font-size:13px;font-weight:700;color:var(--body)}
-  .prog-live-sub{font-size:12px;color:var(--sub);margin-left:auto;font-weight:600}
+  .prog-stats{display:flex;gap:10px;margin:2px 0 14px}
+  .prog-stat{flex:1;text-align:center;padding:12px 8px;background:var(--fill);
+    border:1px solid var(--line);border-radius:var(--r-md)}
+  .prog-stat-num{font-size:30px;font-weight:800;line-height:1;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .prog-stat-label{font-size:12px;font-weight:700;color:var(--sub);margin-top:6px}
+  .prog-stat.viewed .prog-stat-num{color:var(--info)}
+  .prog-stat.saved .prog-stat-num{color:var(--ok)}
+  .prog-stat.filtered .prog-stat-num{color:var(--warn)}
   .timeline{list-style:none;margin:0;padding:0}
   .timeline li{position:relative;padding:0 0 16px 26px}
   .timeline li:last-child{padding-bottom:0}
@@ -244,12 +247,6 @@
   .timeline li.done .tl-dot{background:var(--ok)}
   .tl-label{font-size:13px;font-weight:700;color:var(--ink)}
   .tl-text{font-size:12.5px;color:var(--sub);margin-top:2px}
-  .tl-count{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
-  .tl-count span{font-size:11.5px;font-weight:700;border-radius:999px;padding:2px 9px;background:var(--fill);
-    border:1px solid var(--line);color:var(--sub)}
-  .tl-count span.saved{color:var(--ok);border-color:#a7f3d0;background:var(--ok-bg)}
-  .tl-count span.skip{color:var(--muted)}
-  .tl-count span.comment{color:var(--info);border-color:#bfdbfe;background:#eff6ff}
   .tl-time{position:absolute;right:0;top:1px;font-size:11px;color:var(--muted);font-weight:600}
   .prog-error{display:none;margin-top:12px;background:#fef2f2;border:1px solid #fecaca;border-left:3px solid var(--danger);
     border-radius:var(--r-sm);padding:10px 12px;font-size:12.5px;color:var(--danger);font-weight:600;line-height:1.5}
@@ -427,10 +424,19 @@
   <div class="card prog-card" id="progCard">
     <div class="card-label">运行进度</div>
     <div class="prog-current" id="progCurrent"><span class="spin-dot"></span><span id="progCurrentText"></span></div>
-    <div class="prog-live" id="progLive">
-      <span class="prog-live-num" id="progLiveNum">0</span>
-      <span class="prog-live-unit" id="progLiveUnit">条帖子</span>
-      <span class="prog-live-sub" id="progLiveSub"></span>
+    <div class="prog-stats" id="progLive">
+      <div class="prog-stat viewed">
+        <div class="prog-stat-num" id="statViewed">0</div>
+        <div class="prog-stat-label">已查看（篇）</div>
+      </div>
+      <div class="prog-stat saved">
+        <div class="prog-stat-num" id="statSaved">0</div>
+        <div class="prog-stat-label" id="statSavedLabel">已采集（条）</div>
+      </div>
+      <div class="prog-stat filtered">
+        <div class="prog-stat-num" id="statFiltered">0</div>
+        <div class="prog-stat-label">已过滤（条）</div>
+      </div>
     </div>
     <ul class="timeline" id="progTimeline"></ul>
     <div class="prog-error" id="progError"></div>
@@ -477,7 +483,6 @@ let pendingLoginPlat='';
 
 const STATUS_TEXT={pending:'待运行',running:'运行中',done:'已完成',failed:'失败',stopped:'已停止'};
 const PLAT_STATUS_TEXT={pending:'排队等待',running:'采集中',done:'已完成',failed:'失败',stopped:'已停止',skipped:'已跳过',blocked:'风控冷却'};
-const COUNT_LABEL={saved:'已采',skip:'跳过',comment:'评论'};
 const pn=()=>Object.fromEntries(TASK_PLATS);
 
 /* ==================== 平台加载 ==================== */
@@ -798,7 +803,11 @@ async function poll(){
   $('#submitBtn').disabled=s.running;
   if(s.progress){
     $('#progCard').classList.add('show');
-    renderProgress(s.progress);
+    // live_counts 在 /api/status 顶层，必须并入 progress 再渲染（否则大数字恒 0）；
+    // 缺失时回退到服务端已同步的 counts 口径。
+    const pg=s.progress;
+    pg.live_counts=s.live_counts||{saved:(pg.counts||{}).saved||0,comment:(pg.counts||{}).comment||0};
+    renderProgress(pg);
   }else if(!s.running){
     $('#progCard').classList.remove('show');
   }
@@ -829,27 +838,21 @@ function renderProgress(pg){
   const cur=$('#progCurrent');
   cur.classList.toggle('done',pg.finished);
   $('#progCurrentText').textContent=pg.error?pg.error:(pg.current||'准备中');
-  // 实时采集计数：以 jsonl 落盘行为准（全平台统一），随轮询增长，让用户心里有底
+  // 顶部三个大数字：已查看（抓过详情的篇数）/ 已采集（本轮落盘条数）/ 已过滤（窗口外舍弃条数），
+  // 口径统一、一眼看清采集漏斗。已采集以 jsonl 落盘为准（live_counts），随轮询增长。
   const lc=pg.live_counts||{};
   const pc=pg.counts||{};
   const saved=lc.saved||0, comment=lc.comment||0, skip=pc.skip||0, viewed=pc.viewed||0;
   const isCommentMode=saved===0&&comment>0;
-  $('#progLiveNum').textContent=isCommentMode?comment:saved;
-  $('#progLiveUnit').textContent=isCommentMode?'条评论':'条帖子';
-  const sub=[];
-  if(viewed)sub.push('已查看 '+viewed+' 篇');
-  if(skip)sub.push('跳过 '+skip);
-  if(saved>0&&comment>0)sub.push('评论 '+comment);
-  if(pg.finished)sub.push('已完成');
-  $('#progLiveSub').textContent=sub.join(' · ');
+  $('#statViewed').textContent=viewed;
+  $('#statSaved').textContent=isCommentMode?comment:saved;
+  $('#statSavedLabel').textContent=isCommentMode?'已采集（条评论）':'已采集（条）';
+  $('#statFiltered').textContent=skip;
   $('#progTimeline').innerHTML=pg.timeline.map(t=>{
-    const counts=Object.entries(t.counts||{}).map(([k,v])=>
-      '<span class="'+k+'">'+(COUNT_LABEL[k]||k)+' '+v+'</span>').join('');
     return '<li class="'+t.state+'"><span class="tl-dot"></span>'+
       (t.time?('<span class="tl-time">'+t.time.slice(0,5)+'</span>'):'')+
       '<div class="tl-label">'+esc(t.label)+'</div>'+
-      (t.text?('<div class="tl-text">'+esc(t.text)+'</div>'):'')+
-      (counts?('<div class="tl-count">'+counts+'</div>'):'')+'</li>';
+      (t.text?('<div class="tl-text">'+esc(t.text)+'</div>'):'')+'</li>';
   }).join('');
   $('#progError').classList.toggle('show',!!pg.error);
   $('#progError').textContent=pg.error||'';
