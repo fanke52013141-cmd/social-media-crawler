@@ -186,6 +186,10 @@ class XhsUIBridge:
                 except Exception as e:
                     utils.logger.warning(f"[UIBridge] 点击「最新」排序失败，沿用当前排序: {e}")
             if result is None:
+                # SSR 兜底：搜索页首屏可能走 SSR 不发 /search/notes XHR，
+                # 从 __INITIAL_STATE__.search 取首屏结果（主世界执行）。
+                result = await self._ssr_search_notes(sp)
+            if result is None:
                 raise DataFetchError(f"UI search no response for keyword={keyword}")
             await rhythm.human_pause(1.5, 4)
             return result
@@ -197,6 +201,36 @@ class XhsUIBridge:
             return {"has_more": False, "items": []}
         await rhythm.human_pause(1.0, 3)
         return result
+
+    async def _ssr_search_notes(self, sp: Page) -> Optional[Dict]:
+        """搜索页 SSR 兜底：从 __INITIAL_STATE__.search 提取首屏结果（主世界执行）。
+        取不到返回 None，调用方回退 API；结构不匹配时优雅降级，不影响采集。"""
+        try:
+            raw = await sp.evaluate(
+                """() => {
+                  const uw = v => (v && (v.__v_isRef || v.__v_isShallow))
+                      ? (v._value !== undefined ? v._value : v._rawValue) : v;
+                  const st = window.__INITIAL_STATE__;
+                  const s = st && uw(st.search);
+                  if (!s) return null;
+                  const list = uw(s.noteList || s.note_list || s.notes);
+                  if (!Array.isArray(list) || !list.length) return null;
+                  const items = list.map(uw).map(n => ({
+                    id: n.id || n.noteId || n.note_id,
+                    model_type: 'note',
+                    note_card: uw(n.noteCard || n.note_card || n),
+                    xsec_token: n.xsecToken || n.xsec_token || ''
+                  })).filter(it => it.id);
+                  if (!items.length) return null;
+                  return {has_more: !!(s.hasMore || s.has_more), items: items};
+                }""",
+                isolated_context=False,
+            )
+            if raw and raw.get("items"):
+                return raw
+        except Exception as e:
+            utils.logger.warning(f"[UIBridge] SSR 搜索提取异常: {e}")
+        return None
 
     # ---------- 笔记详情 ----------
     async def note_detail(self, note_id: str, xsec_source: str,
@@ -232,6 +266,7 @@ class XhsUIBridge:
                       return note ? JSON.parse(JSON.stringify(note)) : null;
                     }""",
                     note_id,
+                    isolated_context=False,
                 )
                 if raw:
                     import humps
@@ -302,6 +337,7 @@ class XhsUIBridge:
                   return null;
                 }""",
                 note_id,
+                isolated_context=False,
             )
         except Exception as e:
             utils.logger.warning(f"[UIBridge] SSR 首屏评论提取异常 note={note_id}: {e}")

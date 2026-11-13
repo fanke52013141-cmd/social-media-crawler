@@ -724,7 +724,8 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
                     nickname: b.nickname || '',
                     ip_location: b.ipLocation || b.ip_location || ''
                   };
-                }"""
+                }""",
+                isolated_context=False,
             )
             if info and info.get("red_id"):
                 return info
