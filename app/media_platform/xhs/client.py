@@ -711,7 +711,7 @@ class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
             # 真实访问主页：拟人化浏览停留后再解析，而非落地即取数
             rhythm = HumanRhythm(page)
             await rhythm.browse_step()
-            await asyncio.sleep(random.uniform(3, 8))
+            await asyncio.sleep(round(random.uniform(3, 8), 2))
 
             info = await page.evaluate(
                 """() => {

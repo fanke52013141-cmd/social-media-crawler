@@ -19,10 +19,11 @@ from tools import utils
 
 def _human_wait_seconds(lo: float, hi: float) -> float:
     """生成更接近真人注意力的等待时长：对数正态分布（多数偏短、少数偏长），
-    再截断到 [lo, hi]，比均匀分布更像真人的节奏。"""
+    再截断到 [lo, hi]，比均匀分布更像真人的节奏。
+    保留两位小数（如 6.32s），避免整数秒的机器特征。"""
     median = max(0.05, (lo + hi) / 2.0)
     val = median * math.exp(random.gauss(0.0, 0.55))
-    return min(hi, max(lo, val))
+    return round(min(hi, max(lo, val)), 2)
 
 
 class HumanRhythm:
@@ -100,7 +101,7 @@ class HumanRhythm:
                 self._session_actions = 0
                 rest = _human_wait_seconds(config.SESSION_REST_MIN, config.SESSION_REST_MAX)
                 utils.logger.info(
-                    f"[HumanRhythm] 会话休息 {rest:.0f}s 后继续（不影响最终数据）"
+                    f"[HumanRhythm] 会话休息 {rest:.2f}s 后继续（不影响最终数据）"
                 )
                 await asyncio.sleep(rest)
 

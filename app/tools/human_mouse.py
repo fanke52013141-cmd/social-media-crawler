@@ -89,10 +89,10 @@ async def click_human(page, locator, timeout: int = 5000) -> None:
         sx = tx + random.uniform(-120, 120)
         sy = ty + random.uniform(-90, 90)
         await move_human(page, sx, sy, tx, ty)
-        await asyncio.sleep(random.uniform(0.1, 0.4))   # 点击前犹豫
+        await asyncio.sleep(round(random.uniform(0.1, 0.4), 2))   # 点击前犹豫
         await page.mouse.move(tx, ty)
         await page.mouse.down()
-        await asyncio.sleep(random.uniform(0.05, 0.15))  # 按压时长抖动
+        await asyncio.sleep(round(random.uniform(0.05, 0.15), 2))  # 按压时长抖动
         await page.mouse.up()
     except Exception:
         await locator.click(timeout=timeout)

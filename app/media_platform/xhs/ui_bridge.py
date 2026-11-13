@@ -270,7 +270,7 @@ class XhsUIBridge:
         """
         fl = sp.locator(".filter").first
         await fl.hover(timeout=5000)
-        await asyncio.sleep(random.uniform(0.8, 1.5))
+        await asyncio.sleep(round(random.uniform(0.8, 1.5), 2))
         fb = await fl.bounding_box()
         if fb:  # Playwright 返回 width/height，归一化为选项包围盒的 w/h
             fb = {"x": fb["x"], "y": fb["y"], "w": fb["width"], "h": fb["height"]}
@@ -279,7 +279,7 @@ class XhsUIBridge:
             utils.logger.info("[UIBridge] 已应用搜索筛选：排序=最新，发布时间=%s"
                               % (time_filter or "不限"))
         if ok and time_filter:
-            await asyncio.sleep(random.uniform(0.6, 1.2))
+            await asyncio.sleep(round(random.uniform(0.6, 1.2), 2))
             tok, _ = await self._click_panel_tag(sp, time_filter, latest_box or fb)
             if not tok:
                 utils.logger.warning(
@@ -318,8 +318,8 @@ class XhsUIBridge:
             for i in range(1, steps + 1):
                 await sp.mouse.move(sx + (cx - sx) * i / steps,
                                     sy + (cy - sy) * i / steps)
-                await asyncio.sleep(random.uniform(0.02, 0.06))
-            await asyncio.sleep(random.uniform(0.2, 0.5))
+                await asyncio.sleep(round(random.uniform(0.02, 0.06), 2))
+            await asyncio.sleep(round(random.uniform(0.2, 0.5), 2))
         await sp.mouse.click(cx, cy)
         await asyncio.sleep(0.6)
         active = await sp.evaluate(
@@ -430,29 +430,71 @@ class XhsUIBridge:
         return note_card
 
     async def _read_dwell(self, note_card: Dict, note_id: str) -> None:
-        """按内容长度计算阅读停留，期间拟人化滚动，并缓存顺带加载的评论。"""
+        """两段式阅读（2026-11-13 方案A）：每条扫读 1.8–3.5s，30% 概率细读
+        （约 18 字/秒、保底 2s、封顶 12s、抖动 0.8–1.3）。比"每条均匀读满"
+        更接近真人"多数扫一眼、少数细看"的分布，同时压缩阅读耗时。
+        细读期间随机插入看图悬停/中途多停/没看完就走等真人动作；
+        顺带加载的评论响应在所有停顿间隙 drain 缓存，一条不丢。"""
         text_len = len(note_card.get("title") or "") + len(note_card.get("desc") or "")
-        # 阅读停留：按内容长度计算并加抖动；2026-11-13 提速档——短帖至少 3s，长帖封顶 20s
-        # （原 5-9 字/秒、封顶 40s；现按约 11 字/秒的快读节奏，仍保留真人抖动与滚动）
-        base = min(20.0, max(3.0, text_len / 11.0))
-        dwell = base * random.uniform(0.7, 1.5)
-        steps = random.randint(2, 4)
         cached: List[Dict] = []
-        for i in range(steps):
-            await self._rhythm.browse_step()
-            await asyncio.sleep(dwell / steps)
-            for status, headers, data in self._drain(self._comment_queue):
-                try:
-                    payload = await self._check(status, headers, data)
-                    if payload:
-                        cached.append(payload)
-                except (RiskControlError, CaptchaError, IPBlockError,
-                        PlatformAccessError):
-                    raise
-                except Exception:
-                    continue
+
+        # ---- 阶段1：扫读（每条必有）----
+        await self._rhythm.human_action()
+        skim = round(random.uniform(1.8, 3.5), 2)
+        n = random.randint(1, 2)
+        for _ in range(n):
+            try:
+                await self.page.mouse.wheel(0, random.randint(160, 420))
+            except Exception:
+                pass
+            await asyncio.sleep(round(skim / n, 2))
+            await self._cache_comments(cached)
+
+        # ---- 阶段2：30% 概率细读 ----
+        if random.random() < 0.30:
+            base = min(12.0, max(2.0, text_len / 18.0))
+            dwell = round(base * random.uniform(0.8, 1.3), 2)
+            steps = random.randint(2, 3)
+            for i in range(steps):
+                # 10% 概率没滚到底就离开（真人不一定看完）
+                if i == steps - 1 and random.random() < 0.10:
+                    break
+                await self._rhythm.browse_step()
+                await asyncio.sleep(round(dwell / steps, 2))
+                await self._cache_comments(cached)
+                # 15% 概率被某段吸引，中途多停一会
+                if random.random() < 0.15:
+                    await asyncio.sleep(round(random.uniform(1.2, 2.5), 2))
+                    await self._cache_comments(cached)
+                # 20% 概率移到图片区域看图
+                if random.random() < 0.20:
+                    await self._hover_image()
         if cached:
             self._comment_cache[note_id] = cached
+
+    async def _cache_comments(self, cached: List[Dict]) -> None:
+        """把顺带加载的评论响应 drain 进缓存；风控异常向上抛，其余整体容错。"""
+        for status, headers, data in self._drain(self._comment_queue):
+            try:
+                payload = await self._check(status, headers, data)
+                if payload:
+                    cached.append(payload)
+            except (RiskControlError, CaptchaError, IPBlockError,
+                    PlatformAccessError):
+                raise
+            except Exception:
+                continue
+
+    async def _hover_image(self) -> None:
+        """鼠标移到笔记图片区域（中上部）短暂悬停，模拟真人看图；整体容错。"""
+        try:
+            vp = self.page.viewport_size or {"width": 1280, "height": 800}
+            x = random.randint(int(vp["width"] * 0.30), int(vp["width"] * 0.70))
+            y = random.randint(int(vp["height"] * 0.20), int(vp["height"] * 0.55))
+            await self.page.mouse.move(x, y, steps=random.randint(6, 14))
+            await asyncio.sleep(round(random.uniform(0.5, 1.5), 2))
+        except Exception:
+            return
 
     # ---------- 评论 ----------
     async def _ssr_first_comments(self, note_id: str) -> Optional[Dict]:
@@ -516,7 +558,7 @@ class XhsUIBridge:
                    f"?xsec_token={quote(xsec_token or '')}&xsec_source=pc_search")
             await self.page.goto(url, wait_until="domcontentloaded")
             await self._wait_resp(self._feed_queue, 8)
-            await asyncio.sleep(random.uniform(1.5, 3.5))
+            await asyncio.sleep(round(random.uniform(1.5, 3.5), 2))
         # 2.5) SSR 首屏评论：直接 URL 打开时首批评论内嵌页面、不发 XHR。
         # 若页面是 SSR 却取不到首屏，宁可抛错回退 API，也不静默丢首页评论。
         if not cached:
@@ -567,7 +609,7 @@ class XhsUIBridge:
                         payload = await self._wait_resp(self._sub_queue, 8)
                         if payload is not None:
                             yield "sub", payload
-                        await asyncio.sleep(random.uniform(0.8, 2.0))
+                        await asyncio.sleep(round(random.uniform(0.8, 2.0), 2))
                         break  # DOM 已变化，重新枚举
                     except Exception:
                         continue
