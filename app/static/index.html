@@ -237,6 +237,7 @@
   .prog-stat.viewed .prog-stat-num{color:var(--info)}
   .prog-stat.saved .prog-stat-num{color:var(--ok)}
   .prog-stat.filtered .prog-stat-num{color:var(--warn)}
+  .prog-stat.pending .prog-stat-num{color:var(--sub)}
   .timeline{list-style:none;margin:0;padding:0}
   .timeline li{position:relative;padding:0 0 16px 26px}
   .timeline li:last-child{padding-bottom:0}
@@ -436,6 +437,10 @@
       <div class="prog-stat filtered">
         <div class="prog-stat-num" id="statFiltered">0</div>
         <div class="prog-stat-label">已过滤（条）</div>
+      </div>
+      <div class="prog-stat pending" id="statPendingWrap">
+        <div class="prog-stat-num" id="statPending">0</div>
+        <div class="prog-stat-label">未入库（篇）</div>
       </div>
     </div>
     <ul class="timeline" id="progTimeline"></ul>
@@ -838,16 +843,26 @@ function renderProgress(pg){
   const cur=$('#progCurrent');
   cur.classList.toggle('done',pg.finished);
   $('#progCurrentText').textContent=pg.error?pg.error:(pg.current||'准备中');
-  // 顶部三个大数字：已查看（抓过详情的篇数）/ 已采集（本轮落盘条数）/ 已过滤（窗口外舍弃条数），
-  // 口径统一、一眼看清采集漏斗。已采集以 jsonl 落盘为准（live_counts），随轮询增长。
+  // 顶部四个大数字：已查看（抓过详情的篇数，按笔记去重）/ 已采集（本轮落盘条数）/
+  // 已过滤（窗口外舍弃条数）/ 未入库（已查看但还没落盘：处理中+获取失败），
+  // 口径统一、一眼看清采集漏斗：已查看 = 已采集 + 已过滤 + 未入库。
+  // 已采集以 jsonl 落盘为准（live_counts），随轮询增长。
   const lc=pg.live_counts||{};
   const pc=pg.counts||{};
   const saved=lc.saved||0, comment=lc.comment||0, skip=pc.skip||0, viewed=pc.viewed||0;
+  const failed=pc.failed||0;
   const isCommentMode=saved===0&&comment>0;
+  const pending=Math.max(0,viewed-saved-skip);
+  const inflight=Math.max(0,pending-failed);
   $('#statViewed').textContent=viewed;
   $('#statSaved').textContent=isCommentMode?comment:saved;
   $('#statSavedLabel').textContent=isCommentMode?'已采集（条评论）':'已采集（条）';
   $('#statFiltered').textContent=skip;
+  $('#statPending').textContent=pending;
+  $('#statPendingWrap').style.display=isCommentMode?'none':'';
+  $('#statPendingWrap').title='已查看但未入库 '+pending+' 篇 = 处理中 '+inflight+
+    ' 篇（详情排队/采集中，稍后自动入库）+ 获取失败 '+failed+
+    ' 篇（平台拒绝或笔记已删除，详见技术运行日志）。';
   $('#progTimeline').innerHTML=pg.timeline.map(t=>{
     return '<li class="'+t.state+'"><span class="tl-dot"></span>'+
       (t.time?('<span class="tl-time">'+t.time.slice(0,5)+'</span>'):'')+

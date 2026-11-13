@@ -263,6 +263,14 @@ def qrcode():
 def status():
     # 任务路径（立即执行/定时，走 orchestrator）与即时单进程路径统一收口
     tid = scheduler.active_task_id
+    if not tid:
+        # 服务重启后内存态丢失：回退到 tasks.json 中仍标记运行的任务，
+        # 保证孤儿子进程采集期间进度卡仍可见（仅展示回退，不改调度器状态；
+        # 子进程结束后会自行把任务状态写回，回退随之消失）。
+        for t in task_store.list_tasks():
+            if t.get("status") == task_store.STATUS_RUNNING:
+                tid = t["id"]
+                break
     task = task_store.get_task(tid) if tid else None
     p = state["proc"]
     state_running = bool(p and p.poll() is None)
@@ -277,7 +285,9 @@ def status():
                 "crawl_mode": task.get("crawl_mode", "login"), "login_only": False}
         lf = DATA / f"orchestrator_{tid}_{cur_plat}.log"
         if lf.exists():
-            log_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()[-200:]
+            # 全量读取用于计数（已查看/已过滤/失败按整轮累计，截断会少计
+            # 导致漏斗等式不成立）；展示用的 tail 仍只取最近 40 行。
+            log_lines = lf.read_text(encoding="utf-8", errors="replace").splitlines()
     else:
         # 即时单进程路径
         if LOG.exists():
@@ -304,7 +314,7 @@ def status():
             from tools.live_count import live_counts
             live = live_counts(plat_code, started_ts, meta.get("data_mode", "content"))
     # 统一计数口径：进度时间线的 saved/comment 以 jsonl 落盘计数为准。
-    # 日志解析只覆盖部分平台且仅读最近 200 行，会少计；落盘行与导出同源，全平台准确。
+    # 日志解析只覆盖部分平台，落盘行与导出同源，全平台准确。
     if live and prog:
         prog["counts"]["saved"] = live["saved"]
         prog["counts"]["comment"] = live["comment"]
@@ -367,7 +377,10 @@ async def update_task_api(tid: str, request: Request):
 
 @app.delete("/api/tasks/{tid}")
 def delete_task_api(tid: str):
-    if tid == scheduler.active_task_id:
+    t = task_store.get_task(tid)
+    if t is None:
+        raise HTTPException(404, "任务不存在")
+    if tid == scheduler.active_task_id or t.get("status") == task_store.STATUS_RUNNING:
         raise HTTPException(400, "任务正在运行，请先停止再删除")
     try:
         task_store.delete_task(tid)
@@ -381,6 +394,10 @@ def stop_task_api(tid: str):
     if task_store.get_task(tid) is None:
         raise HTTPException(404, "任务不存在")
     orchestrator.request_stop(tid)
+    if scheduler.active_task_id != tid:
+        # 服务重启后监控循环不在本进程（孤儿采集进程）：按 PID 文件兜底停止
+        if orchestrator.stop_orphan(tid):
+            return {"ok": True, "message": "已停止"}
     return {"ok": True, "message": "已发送停止信号"}
 
 

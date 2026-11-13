@@ -30,6 +30,13 @@ MILESTONE_LABEL = {
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} )?(\d{2}:\d{2}:\d{2})")
 _KW_RE = re.compile(r"Current search keyword:\s*(.+?)\s*$")
 _TIME_RE = re.compile(r"(\d{2}:\d{2}:\d{2})")
+# 详情查看按 note_id 去重：同一笔记被多个关键词重复查看只算一篇，
+# 保证「已查看 = 已采集 + 已过滤 + 未入库」漏斗等式成立。
+_DETAIL_ID_RE = re.compile(r"Begin get note detail, note_id:\s*(\S+)")
+# 详情获取失败（平台拒绝/笔记已删除/风控拦截），core.py 各异常分支的日志特征
+_FAIL_ID_RE = re.compile(
+    r"(?:\[skip\] Failed to get note detail, Id:|Note not found:"
+    r"|Access restricted while getting note|have not fund note detail note_id:)\s*(\S+)")
 
 # 单条日志规则：(正则, 里程碑, 友好文案模板, 计数类型)
 # 计数类型：None / "saved" / "skip" / "comment"
@@ -49,6 +56,9 @@ RULES = [
     (re.compile(r"store\.(xhs|douyin|weibo)\..*update_.*(note|aweme)"),
      M_COLLECT, None, "saved"),
     (re.compile(r"skip out-of-window"), M_COLLECT, None, "skip"),
+    (re.compile(r"\[skip\] Failed to get note detail|Note not found:"
+                r"|Access restricted while getting note|have not fund note detail"),
+     M_COLLECT, "个别帖子获取失败，已跳过继续", None),
     (re.compile(r"get_note_comments|get_comments|batch get note comments|note comment", re.I),
      M_COMMENT, None, "comment"),
     (re.compile(r"humanized pause|human pause", re.I), None, "正在模拟真人浏览，稍作停留", None),
@@ -83,7 +93,9 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
     返回字段：
       timeline: 里程碑列表 [{key,label,text,time,state,counts}]，state=pending/active/done
       current:  当前友好文案（最新一条用户能看懂的话）
-      counts:   {saved, skip, comment}
+      counts:   {saved, skip, comment, viewed, failed}
+                viewed 按 note_id 去重；failed 为详情获取失败的笔记数；
+                未入库（前端计算）= viewed - saved - skip，其中含 failed 与处理中。
       finished: 是否完成
       error:    友好错误文案（无则空串）
     """
@@ -96,7 +108,10 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
 
     ms = {k: {"key": k, "label": MILESTONE_LABEL[k], "text": "",
               "time": "", "state": "pending", "counts": {}} for k in order}
-    counts = {"saved": 0, "skip": 0, "comment": 0, "viewed": 0}
+    counts = {"saved": 0, "skip": 0, "comment": 0, "viewed": 0, "failed": 0}
+    viewed_ids = set()
+    viewed_anon = 0
+    failed_ids = set()
     current = "准备开始"
     error = ""
     last_items: List[str] = []
@@ -105,9 +120,16 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
     for line in lines:
         if not line.strip():
             continue
-        # 详情查看进度：抓详情阶段即累计，让用户在落盘前也能看到进展
+        # 详情查看进度：抓详情阶段即累计（按笔记去重），让用户在落盘前也能看到进展
         if "Begin get note detail" in line:
-            counts["viewed"] += 1
+            dm = _DETAIL_ID_RE.search(line)
+            if dm:
+                viewed_ids.add(dm.group(1))
+            else:
+                viewed_anon += 1
+        fm = _FAIL_ID_RE.search(line)
+        if fm:
+            failed_ids.add(fm.group(1))
         if ERROR_RE.search(line):
             error = "检测到平台安全验证或限流，已自动暂停以保护账号"
         matched = False
@@ -174,9 +196,13 @@ def interpret(lines: List[str], pname: str, data_mode: str = "content",
     elif prev_key and prev_key in ms:
         ms[prev_key]["state"] = "active"
 
+    counts["viewed"] = len(viewed_ids) + viewed_anon
+    counts["failed"] = len(failed_ids)
+
     # 采集里程碑挂计数
     if M_COLLECT in ms:
-        ms[M_COLLECT]["counts"] = {"saved": counts["saved"], "skip": counts["skip"]}
+        ms[M_COLLECT]["counts"] = {"saved": counts["saved"], "skip": counts["skip"],
+                                   "failed": counts["failed"]}
         if not ms[M_COLLECT]["text"] and counts["saved"]:
             ms[M_COLLECT]["text"] = "已采集 %d 条帖子" % counts["saved"]
     if M_COMMENT in ms:
