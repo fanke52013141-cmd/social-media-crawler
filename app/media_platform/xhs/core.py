@@ -139,7 +139,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
 
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            # 首页导航用 domcontentloaded（DOM 就绪即继续），避免默认 "load" 等待全部
+            # 资源被个别卡住的资源拖到超时崩溃；与 UI 桥接导航口径一致。
+            await self.context_page.goto(self.index_url, wait_until="domcontentloaded", timeout=60000)
 
             # Create a client to interact with the Xiaohongshu website.
             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
@@ -603,7 +605,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
             )
             await self.browser_context.add_init_script(path="libs/stealth.min.js")
             self.context_page = await self.browser_context.new_page()
-            await self.context_page.goto(self.index_url)
+            await self.context_page.goto(self.index_url, wait_until="domcontentloaded", timeout=60000)
 
             _, before_dict = utils.convert_cookies(await self.browser_context.cookies())
             before_session = before_dict.get("web_session")

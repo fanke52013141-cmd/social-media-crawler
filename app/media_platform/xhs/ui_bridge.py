@@ -37,7 +37,7 @@ from .exception import (
 from .extractor import XiaoHongShuExtractor
 from .field import SearchSortType
 
-SEARCH_PATH = "/api/sns/web/v1/search/notes"
+SEARCH_PATH = "/api/sns/web/v2/search/notes"
 FEED_PATH = "/api/sns/web/v1/feed"
 COMMENT_PATH = "/api/sns/web/v2/comment/page"
 SUB_COMMENT_PATH = "/api/sns/web/v2/comment/sub/page"
@@ -203,7 +203,8 @@ class XhsUIBridge:
         return result
 
     async def _ssr_search_notes(self, sp: Page) -> Optional[Dict]:
-        """搜索页 SSR 兜底：从 __INITIAL_STATE__.search 提取首屏结果（主世界执行）。
+        """搜索页 SSR 兜底：从 __INITIAL_STATE__.search.feeds 提取首屏结果（主世界执行）。
+        真实结构（实测）：search.feeds 数组，项含 id/modelType/noteCard/xsecToken（camelCase）。
         取不到返回 None，调用方回退 API；结构不匹配时优雅降级，不影响采集。"""
         try:
             raw = await sp.evaluate(
@@ -213,20 +214,27 @@ class XhsUIBridge:
                   const st = window.__INITIAL_STATE__;
                   const s = st && uw(st.search);
                   if (!s) return null;
-                  const list = uw(s.noteList || s.note_list || s.notes);
+                  const list = uw(s.feeds);
                   if (!Array.isArray(list) || !list.length) return null;
-                  const items = list.map(uw).map(n => ({
-                    id: n.id || n.noteId || n.note_id,
-                    model_type: 'note',
-                    note_card: uw(n.noteCard || n.note_card || n),
-                    xsec_token: n.xsecToken || n.xsec_token || ''
-                  })).filter(it => it.id);
+                  const items = [];
+                  for (const it of list) {
+                    const n = uw(it);
+                    if (!n || !n.id) continue;
+                    if (n.modelType && n.modelType !== 'note') continue;
+                    items.push({id: n.id, model_type: 'note',
+                                note_card: uw(n.noteCard) || null,
+                                xsec_token: n.xsecToken || ''});
+                  }
                   if (!items.length) return null;
-                  return {has_more: !!(s.hasMore || s.has_more), items: items};
+                  return {has_more: !!s.hasMore, items: items};
                 }""",
                 isolated_context=False,
             )
             if raw and raw.get("items"):
+                import humps
+                for it in raw["items"]:
+                    if it.get("note_card"):
+                        it["note_card"] = humps.decamelize(it["note_card"])
                 return raw
         except Exception as e:
             utils.logger.warning(f"[UIBridge] SSR 搜索提取异常: {e}")
