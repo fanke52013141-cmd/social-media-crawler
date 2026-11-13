@@ -13,6 +13,7 @@ from tools import task_store, time_util
 from tools import risk_signals
 from tools import task_exporter
 from tools.live_count import live_counts
+import config
 
 ROOT = os.getcwd()
 PY = sys.executable
@@ -40,17 +41,73 @@ def _is_stop(task_id: str) -> bool:
     return _stop_flags.get(task_id, False)
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    """结束进程树（Windows 下 taskkill /T）。精简 PATH 时用完整路径。"""
+def _kill_pid(pid: int) -> None:
+    """按 PID 结束进程树（Windows 下 taskkill /T）。"""
     taskkill = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "taskkill.exe")
     try:
-        subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+        subprocess.run([taskkill, "/PID", str(pid), "/T", "/F"], capture_output=True)
     except Exception:
-        proc.kill()
+        pass
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """结束进程树并回收子进程句柄。"""
+    _kill_pid(proc.pid)
     try:
         proc.wait(timeout=8)
     except Exception:
         proc.kill()
+
+
+def _pid_file(task_id: str, platform: str) -> str:
+    """运行中子进程的 PID 落盘位置：服务重启后停止按钮的兜底依据。"""
+    return os.path.join(ROOT, "data", f"run_{task_id}_{platform}.pid")
+
+
+def _remove_pid_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _is_python_pid(pid: int) -> bool:
+    """校验 PID 仍存活且是 python 进程（防 PID 复用误杀无关进程）。"""
+    tasklist = os.path.join(os.environ.get("SYSTEMROOT", r"C:\Windows"), "System32", "tasklist.exe")
+    try:
+        out = subprocess.run([tasklist, "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, timeout=10).stdout
+        return "python" in out.lower()
+    except Exception:
+        return False
+
+
+def stop_orphan(task_id: str) -> bool:
+    """服务重启后监控循环丢失的兜底停止：按 PID 文件找到孤儿采集子进程并结束，
+    把任务/平台状态标记为已停止。返回是否确实处理了存活的孤儿进程。"""
+    import glob as _glob
+    handled = False
+    for pf in _glob.glob(os.path.join(ROOT, "data", f"run_{task_id}_*.pid")):
+        platform = os.path.basename(pf)[len(f"run_{task_id}_"):-len(".pid")]
+        try:
+            with open(pf, encoding="utf-8") as fh:
+                pid = int(fh.read().strip())
+        except (OSError, ValueError):
+            pid = 0
+        if pid and _is_python_pid(pid):
+            _kill_pid(pid)
+            handled = True
+            task_store.update_platform_status(
+                task_id, platform, {"status": "stopped", "message": "已手动停止"})
+        try:
+            os.remove(pf)
+        except OSError:
+            pass
+    if handled:
+        task_store.update_task(task_id, {"status": task_store.STATUS_STOPPED,
+                                         "message": "已手动停止",
+                                         "ended_at": time_util.get_current_time()})
+    return handled
 
 
 def build_cmd(task: Dict, platform: str, win_start: str, win_end: str) -> Optional[list]:
@@ -82,8 +139,15 @@ def build_cmd(task: Dict, platform: str, win_start: str, win_end: str) -> Option
     return cmd
 
 
-def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dict:
-    """执行单个平台并返回结果摘要。"""
+def run_platform(task: Dict, platform: str, win_start: str, win_end: str,
+                 deadline_ts: Optional[float] = None) -> Dict:
+    """执行单个平台并返回结果摘要。
+
+    两道时间刹车（到点优雅停止，已采数据不丢，正常收尾导出）：
+    - deadline_ts：本轮窗口截止时间，到点打断当前平台（每日任务跨午夜兜底）；
+    - config.PLATFORM_MAX_RUNTIME_MIN：单平台运行时长上限，防热门关键词
+      实时流不断追新帖导致任务跑数小时。
+    """
     task_id = task["id"]
     cmd = build_cmd(task, platform, win_start, win_end)
     if cmd is None:
@@ -100,21 +164,41 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
     out.flush()
     proc = subprocess.Popen(cmd, cwd=ROOT, stdout=out, stderr=subprocess.STDOUT)
     out.close()
+    # PID 落盘：服务重启后停止按钮可据此兜底结束孤儿子进程
+    pid_path = _pid_file(task_id, platform)
+    try:
+        with open(pid_path, "w", encoding="utf-8") as pf:
+            pf.write(str(proc.pid))
+    except OSError:
+        pass
 
     data_mode = task.get("data_mode", "content")
     last_count_ts = 0.0
+    stop_reason = ""
+    max_runtime = float(getattr(config, "PLATFORM_MAX_RUNTIME_MIN", 120)) * 60
     while True:
         rc = proc.poll()
         if rc is not None:
             break
         if _is_stop(task_id):
             _kill_tree(proc)
+            _remove_pid_file(pid_path)
             live = live_counts(platform, run_start_ts, data_mode)
             return {"status": "stopped", "contents": live["saved"],
                     "comments": live["comment"], "message": "已手动停止"}
+        now = time.time()
+        # 时间刹车：到 deadline 或运行时长上限即优雅停止当前平台，
+        # 已落盘数据一条不丢，随后正常收尾导出。
+        if deadline_ts is not None and now >= deadline_ts:
+            stop_reason = "已到结束时间，收尾导出"
+            _kill_tree(proc)
+            break
+        if max_runtime > 0 and now - run_start_ts >= max_runtime:
+            stop_reason = f"已达单平台时长上限 {config.PLATFORM_MAX_RUNTIME_MIN} 分钟，收尾导出"
+            _kill_tree(proc)
+            break
         # 运行中每 10 秒把落盘计数写回任务卡（与进度卡大数字同源），
         # 避免任务列表在采集期间一直显示 0
-        now = time.time()
         if now - last_count_ts >= 10:
             last_count_ts = now
             live = live_counts(platform, run_start_ts, data_mode)
@@ -133,6 +217,9 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
         status = "blocked"
         dur = f"{cooldown // 3600} 小时" if cooldown >= 3600 else f"{cooldown // 60} 分钟"
         msg = f"检测到 {high_risk} 次风控信号，已自动冷却 {dur} 以保护账号（24小时内再犯升级）"
+    elif stop_reason:
+        # 时间刹车触发的主动停止：数据已边抓边存，按完成收尾导出
+        status, msg = "done", stop_reason
     elif rc == 0:
         status = "done"
         if task["data_mode"] == task_store.DATA_COMMENT:
@@ -141,6 +228,7 @@ def run_platform(task: Dict, platform: str, win_start: str, win_end: str) -> Dic
             msg = f"完成，共 {total_c} 条帖子"
     else:
         status, msg = "failed", f"异常退出（码 {rc}），详见日志"
+    _remove_pid_file(pid_path)
     return {"status": status, "contents": total_c, "comments": total_m, "message": msg}
 
 
@@ -148,8 +236,8 @@ def run_once(task: Dict, win_start: str, win_end: str, deadline_ts: Optional[int
              platforms: Optional[list] = None) -> Dict:
     """执行一轮：逐平台串行，平台间休息。返回本轮整体结果。
 
-    deadline_ts：正常到点收尾的截止时间戳。到达后不再启动新平台，当前平台跑完即结束；
-    与用户手动停止（_stop_flags，立即终止当前平台）相区别。
+    deadline_ts：正常到点收尾的截止时间戳。到达后不再启动新平台，并打断当前平台
+    （优雅停止，已采数据不丢）；与用户手动停止（_stop_flags，立即终止）相区别。
     platforms：本轮实际执行的平台子集（登录体检失效的平台已被剔除）；缺省为任务全部平台。
     """
     task_id = task["id"]
@@ -178,7 +266,7 @@ def run_once(task: Dict, win_start: str, win_end: str, deadline_ts: Optional[int
             task_store.update_platform_status(task_id, platform, res)
             continue
         task_store.update_task(task_id, {"current_platform": platform})
-        res = run_platform(task, platform, win_start, win_end)
+        res = run_platform(task, platform, win_start, win_end, deadline_ts=deadline_ts)
         results[platform] = res
         task_store.update_platform_status(task_id, platform, res)
 

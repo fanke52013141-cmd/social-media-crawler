@@ -197,6 +197,8 @@ class TestOrchestratorLiveCounts:
         it = iter(polls)
 
         class FakeProc:
+            pid = 4321  # 真实 Popen 必有 pid（PID 落盘兜底停止用）
+
             def poll(self):
                 return next(it)
         monkeypatch.setattr(orch.subprocess, "Popen", lambda *a, **k: FakeProc())

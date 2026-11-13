@@ -219,6 +219,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
         max_pages = (config.CRAWLER_MAX_NOTES_COUNT + xhs_limit_count - 1) // xhs_limit_count
         if has_window:
             max_pages += 2
+        # 本轮已抓过详情的笔记（跨关键词去重）：同一帖被多个关键词搜到时
+        # 不再重复抓详情/评论/主页，省请求、降风控暴露；存储层去重之外的请求层去重。
+        seen_note_ids = set()
         for keyword in config.KEYWORDS.split(","):
             keyword = keyword.strip()
             if not keyword:
@@ -257,7 +260,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
                             xsec_source=post_item.get("xsec_source"),
                             xsec_token=post_item.get("xsec_token"),
                             semaphore=semaphore,
-                        ) for post_item in notes_res.get("items", {}) if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        ) for post_item in notes_res.get("items", {})
+                        if post_item.get("model_type") not in ("rec_query", "hot_query")
+                        and post_item.get("id") not in seen_note_ids
                     ]
                     # 边抓边存：每篇详情抓完立即落盘，实时计数随之增长，中断也不丢已采数据。
                     # （原为 gather 攒齐整批再保存，导致采集全程计数为 0、用户看不到进度。）
@@ -266,6 +271,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
                         note_detail = await coro
                         note_details.append(note_detail)
                         if note_detail:
+                            # 抓过详情即记入去重集（含窗口外跳过者：换关键词同样窗口外）
+                            seen_note_ids.add(note_detail.get("note_id"))
                             # 时间窗过滤：发布时间不在窗口内的跳过，不入库、不计数
                             if not time_util.in_window(note_detail.get("time")):
                                 utils.logger.info(
@@ -506,12 +513,12 @@ class XiaoHongShuCrawler(AbstractCrawler):
                     self._new_creator_visited += 1
                     # 拟人化慢速等待：访问主页后做真人动作并随机等待，节奏明显放慢
                     await self.xhs_client._human_action()
-                    await asyncio.sleep(random.uniform(config.CREATOR_SLEEP_MIN, config.CREATOR_SLEEP_MAX))
+                    await asyncio.sleep(round(random.uniform(config.CREATOR_SLEEP_MIN, config.CREATOR_SLEEP_MAX), 2))
                     # 每访问若干个新主页插一次长休息，歇完继续（无人数上限）
                     if self._new_creator_visited % config.CREATOR_REST_EVERY == 0:
-                        rest = random.uniform(config.CREATOR_LONG_REST_MIN, config.CREATOR_LONG_REST_MAX)
+                        rest = round(random.uniform(config.CREATOR_LONG_REST_MIN, config.CREATOR_LONG_REST_MAX), 2)
                         utils.logger.info(
-                            f"[XiaoHongShuCrawler._enrich_and_store] 已访问 {self._new_creator_visited} 个主页，长休息 {rest:.0f}s 后继续"
+                            f"[XiaoHongShuCrawler._enrich_and_store] 已访问 {self._new_creator_visited} 个主页，长休息 {rest:.2f}s 后继续"
                         )
                         await asyncio.sleep(rest)
                 ui["red_id"] = self._red_id_cache.get(uid) or ""
